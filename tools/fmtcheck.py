@@ -1,17 +1,37 @@
-"""fmtcheck.py (2026-11-04, frente 5F; antes docs/experimentos/revisiones/codigo_2026-10-29/cr_fmtcheck.py): cada string.Format( ... ) de un
-archivo C# tiene al menos tantos argumentos como pide su placeholder mas alto, y su formato es un literal. Un {3} con 3 argumentos tira
-FormatException en vivo (NinjaTrader la ve recien cuando se ejecuta esa linea).
+"""fmtcheck.py (2026-11-04, frente 5F; antes docs/experimentos/revisiones/codigo_2026-10-29/cr_fmtcheck.py): cada string.Format / String.Format /
+.AppendFormat( ... ) de un archivo C# tiene un formato literal bien formado (llaves balanceadas, items {n[,ancho][:formato]}) y al menos tantos
+argumentos como pide su placeholder mas alto. Un {3} con 3 argumentos o una llave suelta tira FormatException en vivo (NinjaTrader la ve recien
+cuando se ejecuta esa linea, y en OnBarUpdate deshabilita la estrategia).
 Run: python3 tools/fmtcheck.py NQMaster.cs   (sale 1 si hay alguna sospechosa)"""
 import re, sys
+
+CALL = re.compile(r"(?:\b[sS]tring\.Format|\.AppendFormat)\(")
+
+
+def well_formed(fmt):
+    """.NET composite format grammar on the raw literal text: {{ and }} escapes, items {index[,alignment][:format]}, no stray braces."""
+    i = 0
+    while i < len(fmt):
+        c = fmt[i]
+        if c == "{":
+            if fmt[i + 1:i + 2] == "{": i += 2; continue
+            j = fmt.find("}", i)
+            if j < 0 or not re.fullmatch(r"\s*\d+\s*(,\s*-?\d+\s*)?(:[^{}]*)?", fmt[i + 1:j]): return False
+            i = j + 1
+        elif c == "}":
+            if fmt[i + 1:i + 2] == "}": i += 2; continue
+            return False
+        else: i += 1
+    return True
 
 
 def check(path):
     src = open(path, encoding="utf-8-sig").read()
     i = 0; n = 0; bad = []
     while True:
-        k = src.find("string.Format(", i)
-        if k < 0: break
-        j = k + len("string.Format(")
+        mm = CALL.search(src, i)
+        if not mm: break
+        k = mm.start(); j = mm.end()
         depth = 1; args = []; cur = ""; instr = False; esc = False; inchar = False
         while depth > 0 and j < len(src):
             c = src[j]
@@ -44,6 +64,7 @@ def check(path):
         nargs = len(args) - 1 - off; mx = max(idx) + 1 if idx else 0
         n += 1
         if mx > nargs or not lits: bad.append("line %d: placeholders need %d, args %d: %r" % (line, mx, nargs, fmt[:90]))
+        elif not well_formed(fmt): bad.append("line %d: malformed format string: %r" % (line, fmt[:90]))
         i = j
     return n, bad
 

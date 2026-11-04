@@ -4,7 +4,7 @@
 // Run on a 1-MINUTE MNQ chart (CME US Index Futures ETH). Gold runs in its own strategy (GoldMaster.cs) on an MGC chart.
 // A 5-minute series is added internally (MSEQ and ICT modules).
 // Profiles (Profile parameter; every module can still be switched on/off below):
-//   Ultra     : default. ORB60 0.6R + ORB90 (pullback days), MSEQ, MSEQS, CRT11 2R, ICT x2, MOM11, MOM1030 / MOM13 (only with
+//   Ultra     : default. ORB60 0.6R + ORB90 (pullback days), MSEQ, MSEQS, CRT11 2R, ICT (x1 since 2026-10-27), MOM11, MOM1030 / MOM13 (only with
 //               another module open the same way), ON07, REV06, LON, VW13 wide, VOLB 2R, LATE15, night fades NF05 / LF06 / LF0430;
 //               ENG10 / LATEFH off since 2026-10-12. Real NQ futures 2020-23 / 2024-26: WR 66.9 / 65.7%, PF 1.47 / 1.50,
 //               Sharpe 3.38 / 3.65, ~4.7 trades/day, $1,700-2,300 per month per contract.

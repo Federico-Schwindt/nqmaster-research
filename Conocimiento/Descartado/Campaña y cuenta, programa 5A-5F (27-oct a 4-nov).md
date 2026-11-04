@@ -10,7 +10,7 @@ El plan es 5 Lucid Flex 150K (6c en la eval, 3c en la fondeada) + 3 MFFU Rapid 5
 - **Umbral de retiro de la Lucid fondeada** (exp 04). De $4.600 a $12.000, ninguno gana condiciones. Queda en $6.000.
 - **Presupuesto por plaza, regla 6** (exp 05). Con la revisión trimestral no actúa. Retirada (D2).
 - **Escalonar las compras** (diag 06). Las plazas se sincronizan solas en 22-70 días: el plan es una sola cuenta multiplicada.
-- **Reglas de pausa 1 y 4** (exp 07). Ninguna protege el primer año. Sin edge, el plan tiene media ≈ 0 a +$200 por mes por la convexidad de los retiros. La regla 1 se retiró; la 4 queda como señal de revisión, no como pausa automática (D6).
+- **Reglas de pausa 1 y 4** (exp 07). Ninguna protege el primer año. Sin edge, el plan tiene media positiva (+$251 / +$81 por mes en el exp 07; ≈ 0 a +$200 según el exp 10) por la convexidad de los retiros, y se vuelve negativa con menos de medio tick extra de costo. La regla 1 se retiró; la 4 queda como señal de revisión, no como pausa automática (D6).
 - **Contratos de Lucid según la volatilidad** (exp 09). Empata en 2020-22 y pierde con −35 %.
 - **Repartir los módulos entre plazas** (diag 11). A igual exposición, los quiebres por par de plazas suben ×1,5-6 (×1,2-2 con −35 % y con edge cero). Los módulos casi no se correlacionan (0,03), así que cada plaza ya está diversificada por dentro.
 - **Ya estaba descartado antes del programa:**
@@ -22,7 +22,7 @@ El plan es 5 Lucid Flex 150K (6c en la eval, 3c en la fondeada) + 3 MFFU Rapid 5
 
 - **Monitor de borde re-validado con el z corregido** (exp 08). Sin cambio en NinjaTrader: ante la alarma, 252 días sin los módulos de la revisión anual.
 - **Estrés de costos** (exp 10).
-  - Con el edge completo, el plan aguanta +3 ticks por lado.
+  - Con el edge completo, el plan aguanta +3 ticks por lado en el bootstrap. Sobre la historia contigua 2023-26, el p10 ya cae con +1 tick.
   - Con −35 %, no tiene margen.
   - Se agregó un umbral de costos al runbook (`slip_model.py`): si el costo real supera al modelado, no hay margen.
 - **Capa de seguridad en vivo** (5F). No cambia trades: protege contra doble salida, estado de cuenta desconocido, aplanados fallidos y reinicios del monitor.

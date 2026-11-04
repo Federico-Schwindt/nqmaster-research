@@ -98,7 +98,7 @@ namespace NinjaTrader.NinjaScript.Strategies
 					TextPosition.BottomRight, Brushes.White, dashFont, Brushes.Transparent, Brushes.Black, 75);
 		}
 
-		private void SetPause(bool pauseOn, string why)	// 2026-11-04: 'on' is a contextual keyword (NinjaTrader rejects it as a parameter name)
+		private void SetPause(bool pauseOn, string why)	// 2026-11-04: 'on' is a contextual (LINQ) keyword; NinjaTrader's compiler rejected 'when' as a parameter name (2026-10-17), so none are used
 		{
 			if (State != State.Realtime) return;		// never touch the file during historical processing
 			try

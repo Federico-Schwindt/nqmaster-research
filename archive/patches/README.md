@@ -2,7 +2,7 @@
 
 Desde el 2026-11-04 (frente 5F), **`NQMaster.cs` es la fuente única**: se edita directamente. Antes de cada F5 hay que correr `bash tools/nt8_stub/check.sh NQMaster.cs` y `bash tools/run_tests.sh`.
 
-Los `patch_*.py` de esta carpeta son la historia de cómo se llegó a esa versión. Los documentos los citan como `research/mine/patch_<nombre>.py`, que es donde estaban antes. Calculan la raíz del repo con tres niveles de carpetas (`research/mine/`), así que desde acá escribirían fuera del repo: **no los corras**. Para reproducir la historia, usá `tools/verify_patch_chain.py`, que los copia a una carpeta temporal con la estructura original.
+Los `patch_*.py` de esta carpeta son la historia de cómo se llegó a esa versión. Los documentos los citan como `research/mine/patch_<nombre>.py`, que es donde estaban antes. **No los corras.** Desde acá también llegan a la raíz del repo y operan sobre el `NQMaster.cs` real. Hoy los frenan sus guardas ("ya aplicado" o "regenerar desde el backup"), pero algunos escriben un `NQMaster_backup_pre_*.cs` en la raíz. Para reproducir la historia, usá `python3 tools/verify_patch_chain.py`, que los copia a una carpeta temporal con la estructura original. Las guardas que dicen "ver docs/ESTADO.md" se refieren a esta receta.
 
 ## La última cadena (v4.3 → v4.4)
 

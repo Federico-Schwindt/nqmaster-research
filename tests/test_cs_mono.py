@@ -1,6 +1,6 @@
 """Funciones puras de NQMaster.cs compiladas con mcs y corridas con mono, contra una referencia independiente (frente 5F, 2026-11-04).
 - UsEtFromUtc (control de reloj): la regla fija de horario de verano de EE.UU. contra la base de zonas horarias (America/New_York),
-  hora por hora 2010-2035: mismos cambios de offset.
+  cada 15 minutos 2010-2035: mismos cambios de offset.
 - EdgeParse / KeyDate (monitor de borde): archivos validos, fecha 0, campos ilegibles, fechas imposibles, NaN y negativos."""
 import datetime as dt, unittest
 from zoneinfo import ZoneInfo
@@ -13,15 +13,15 @@ class CsMono(unittest.TestCase):
         fn = cs_method(read("NQMaster.cs"), "private static DateTime UsEtFromUtc(").replace("private static", "static")
         code = """using System; class T { %s
   static void Main() { DateTime t = new DateTime(2010, 1, 1, 0, 0, 0, DateTimeKind.Utc), end = new DateTime(2036, 1, 1, 0, 0, 0, DateTimeKind.Utc); double prev = 99;
-    for (; t < end; t = t.AddHours(1)) { double off = (UsEtFromUtc(t) - t).TotalHours; if (off != prev) { Console.WriteLine(t.ToString("yyyy-MM-dd HH") + " " + off); prev = off; } } } }""" % fn
+    for (; t < end; t = t.AddMinutes(15)) { double off = (UsEtFromUtc(t) - t).TotalHours; if (off != prev) { Console.WriteLine(t.ToString("yyyy-MM-dd HH:mm") + " " + off); prev = off; } } } }""" % fn
         got = mono_run(code).split("\n")
         ny, t, prev, ref = ZoneInfo("America/New_York"), dt.datetime(2010, 1, 1, tzinfo=dt.timezone.utc), None, []
         while t < dt.datetime(2036, 1, 1, tzinfo=dt.timezone.utc):
             off = t.astimezone(ny).utcoffset().total_seconds() / 3600
-            if off != prev: ref.append("%s %s" % (t.strftime("%Y-%m-%d %H"), int(off))); prev = off
-            t += dt.timedelta(hours=1)
+            if off != prev: ref.append("%s %s" % (t.strftime("%Y-%m-%d %H:%M"), int(off))); prev = off
+            t += dt.timedelta(minutes=15)
         got = [g.strip() for g in got if g.strip()]
-        self.assertEqual(len(ref), 1 + 2 * 26)
+        self.assertEqual(len(ref), 1 + 2 * 26)          # the initial offset + 52 changes
         self.assertEqual(got, ref)
 
     def test_edge_parse(self):
@@ -32,7 +32,7 @@ class CsMono(unittest.TestCase):
                  ("Ultra;20261028;x;20;0;0;;0;2026-10-05", False), ("Ultra;20261328;3.5;20;0;0;;0;2026-10-05", False),
                  ("Ultra;20260231;3.5;20;0;0;;0;2026-10-05", False), ("Ultra;19991231;3.5;20;0;0;;0;2026-10-05", False),
                  ("Ultra;20261028;NaN;20;0;0;;0;2026-10-05", False), ("Ultra;20261028;-1;20;0;0;;0;2026-10-05", False),
-                 ("Ultra;20261028;3.5;-2;0;0;;0;2026-10-05", False), ("Ultra;20261028;3.5", False),
+                 ("Ultra;20261028;3.5;-2;0;0;;0;2026-10-05", False), ("Ultra;20261028;3.5;20;0;-1;;0;2026-10-05", False), ("Ultra;20261028;3.5", False),
                  ("Ultra;20261028;3.5;20;1;250;REV06 MOM13;1;2026-10-05;0.0899;26.93", True)]
         code = """using System; using System.Collections.Generic; using System.Globalization; class T { %s %s
   static void Main() { string[] c = { %s };

@@ -53,22 +53,29 @@ namespace NinjaTrader.NinjaScript {
  public class Trade { public double ProfitCurrency, Commission; public Execution Entry, Exit; public int Quantity; }
  public class TradeCollection : List<Trade> {}
  public class SystemPerformanceC { public TradeCollection AllTrades; }
- public class StrategyBase {
-  public State State; public string Description, Name; public Calculate Calculate; public int EntriesPerDirection; public EntryHandling EntryHandling;
-  public bool IsExitOnSessionCloseStrategy, IsFillLimitOnTouch, IsInstantiatedOnEachOptimizationIteration, TraceOrders; public int ExitOnSessionCloseSeconds, Slippage, BarsRequiredToTrade;
-  public MaximumBarsLookBack MaximumBarsLookBack; public OrderFillResolution OrderFillResolution; public StartBehavior StartBehavior; public TimeInForce TimeInForce;
-  public RealtimeErrorHandling RealtimeErrorHandling; public StopTargetHandling StopTargetHandling; public bool IgnoreOverfill;
-  public Instrument Instrument; public Account Account; public Position Position, PositionAccount; public Bars Bars; public Bars[] BarsArray; public BarsPeriod BarsPeriod; public SystemPerformanceC SystemPerformance;
+ // 2026-11-04 (5F): the members every NinjaScript has (strategies AND indicators); trading members only in StrategyBase, so an indicator that
+ // used a strategy-only member would not type-check (revision 5F)
+ public class NinjaScriptBase {
+  public State State; public string Description, Name; public Calculate Calculate; public MaximumBarsLookBack MaximumBarsLookBack;
+  public Instrument Instrument; public Bars Bars; public Bars[] BarsArray; public BarsPeriod BarsPeriod;
   public int CurrentBar, BarsInProgress, Count; public int[] CurrentBars; public double TickSize;
   public ISeries<double> Open, High, Low, Close, Volume; public ISeries<DateTime> Time;
   public ISeries<double>[] Opens, Highs, Lows, Closes, Volumes; public ISeries<DateTime>[] Times;
   protected virtual void OnStateChange(){} protected virtual void OnBarUpdate(){} public virtual string DisplayName { get { return ""; } }
-  protected virtual void OnOrderUpdate(Order order, double limitPrice, double stopPrice, int quantity, int filled, double averageFillPrice, OrderState orderState, DateTime time, ErrorCode error, string nativeError){}
-  protected virtual void OnExecutionUpdate(Execution execution, string executionId, double price, int quantity, MarketPosition marketPosition, string orderId, DateTime time){}
-  protected virtual void OnPositionUpdate(Position position, double averagePrice, int quantity, MarketPosition marketPosition){}
   protected virtual void OnMarketData(MarketDataEventArgs e){}
   public void RemoveDrawObject(string tag){} public void Print(object o){} public void AddDataSeries(BarsPeriodType t, int v){} public void SetState(State s){}
   public void Alert(string id, Priority p, string msg, string sound, int rearm, System.Windows.Media.Brush b, System.Windows.Media.Brush f){}
+  public double GetCurrentAsk(){return 0;} public double GetCurrentBid(){return 0;}
+ }
+ public class StrategyBase : NinjaScriptBase {
+  public int EntriesPerDirection; public EntryHandling EntryHandling;
+  public bool IsExitOnSessionCloseStrategy, IsFillLimitOnTouch, IsInstantiatedOnEachOptimizationIteration, TraceOrders; public int ExitOnSessionCloseSeconds, Slippage, BarsRequiredToTrade;
+  public OrderFillResolution OrderFillResolution; public StartBehavior StartBehavior; public TimeInForce TimeInForce;
+  public RealtimeErrorHandling RealtimeErrorHandling; public StopTargetHandling StopTargetHandling; public bool IgnoreOverfill;
+  public Account Account; public Position Position, PositionAccount; public SystemPerformanceC SystemPerformance;
+  protected virtual void OnOrderUpdate(Order order, double limitPrice, double stopPrice, int quantity, int filled, double averageFillPrice, OrderState orderState, DateTime time, ErrorCode error, string nativeError){}
+  protected virtual void OnExecutionUpdate(Execution execution, string executionId, double price, int quantity, MarketPosition marketPosition, string orderId, DateTime time){}
+  protected virtual void OnPositionUpdate(Position position, double averagePrice, int quantity, MarketPosition marketPosition){}
   public Order EnterLong(int q, string s){return null;} public Order EnterShort(int q, string s){return null;}
   public Order EnterLong(int bip, int q, string s){return null;} public Order EnterShort(int bip, int q, string s){return null;}
   public Order EnterLongLimit(int bip, bool live, int q, double px, string s){return null;} public Order EnterShortLimit(int bip, bool live, int q, double px, string s){return null;}
@@ -79,7 +86,6 @@ namespace NinjaTrader.NinjaScript {
   public Order ExitLongLimit(int bip, bool live, int q, double px, string s, string from){return null;} public Order ExitShortLimit(int bip, bool live, int q, double px, string s, string from){return null;}
   public void SetStopLoss(string s, CalculationMode m, double v, bool sim){} public void SetProfitTarget(string s, CalculationMode m, double v){}
   public void CancelOrder(Order o){} public void ChangeOrder(Order o, int q, double l, double s){} public Order GetRealtimeOrder(Order o){return o;}
-  public double GetCurrentAsk(){return 0;} public double GetCurrentBid(){return 0;}
  }
  public class Strategy : StrategyBase {}
  public class NinjaScriptPropertyAttribute : Attribute {}
@@ -89,5 +95,5 @@ namespace NinjaTrader.NinjaScript.DrawingTools {
  public enum TextPosition { TopRight, TopLeft, BottomLeft, BottomRight, Center }
  public static class Draw { public static object TextFixed(object owner, string tag, string text, TextPosition p, System.Windows.Media.Brush b, NinjaTrader.Gui.Tools.SimpleFont f, System.Windows.Media.Brush o, System.Windows.Media.Brush a, int op){return null;} }
 }
-// 2026-11-04 (5F): indicators (OrderFlowRecorder.cs, BarExporterUTC.cs) type-check against the same base members as a strategy
-namespace NinjaTrader.NinjaScript.Indicators { public class Indicator : NinjaTrader.NinjaScript.StrategyBase { public bool IsOverlay, DisplayInDataBox, PaintPriceMarkers, IsSuspendedWhileInactive; protected virtual void OnMarketData(NinjaTrader.Data.MarketDataEventArgs marketDataUpdate){} } }
+// 2026-11-04 (5F): indicators (OrderFlowRecorder.cs, BarExporterUTC.cs) type-check against the common NinjaScript members only
+namespace NinjaTrader.NinjaScript.Indicators { public class Indicator : NinjaTrader.NinjaScript.NinjaScriptBase { public bool IsOverlay, DisplayInDataBox, PaintPriceMarkers, IsSuspendedWhileInactive; } }

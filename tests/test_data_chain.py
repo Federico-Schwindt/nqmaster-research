@@ -3,6 +3,8 @@
 - los precios de 1 minuto que usan IS / C24 / REAL / regimen tienen la forma esperada (OHLC coherente, fechas y sesiones en orden);
 - las listas de trades de referencia (research_set 'ultra_d4' de campana y 'ultra_d4_mnq' de paridad) no cambiaron en silencio;
 - si existe la cache de caminos de campana (acct2027_paths.pkl), sigue siendo la construida sobre la lista corregida del 27-oct.
+research_set necesita tambien los datos de oro (xau_hd.npz, mgc_fut.npz): gold_port los carga al importarse (bash tools/cloud_setup.sh los restaura).
+La lista depende del orden de filas del pickle (conflict_filter con entradas opuestas en el mismo minuto): la huella lo cubre.
 Las huellas se regeneran SOLO a proposito: python3 -m tests.test_data_chain --record (y se commitea el cambio con el motivo)."""
 import hashlib, json, os, pickle, sys, unittest
 import numpy as np
@@ -57,6 +59,8 @@ class DataChain(unittest.TestCase):
                 self.assertLessEqual(int(date[0]), first); self.assertGreaterEqual(int(date[-1]), last)
 
     def test_research_sets(self):
+        for f in ("xau_hd.npz", "mgc_fut.npz"):
+            if not os.path.exists(os.path.join(ROOT, "research", "data", f)): self.fail("%s no existe (research_set lo necesita): bash tools/cloud_setup.sh" % f)
         fx = fixtures().get("research_sets", {})
         for name in ("ultra_d4", "ultra_d4_mnq"):
             with self.subTest(set=name):
