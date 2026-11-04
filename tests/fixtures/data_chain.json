@@ -1,0 +1,13 @@
+{
+ "research_sets": {
+  "ultra_d4": {
+   "sha256": "f81e0a51354c82e1444f60de69e7e26a14c833f03f499f2c6ee05c1d4685e17d",
+   "trades": 7573
+  },
+  "ultra_d4_mnq": {
+   "sha256": "fc2721730430f3a6b4b2c791d6b35afcbece8fb0c094557893ec019cf5377b6c",
+   "trades": 3271
+  }
+ },
+ "acct2027_paths": "284af2112abb833eb8bb18b1930e2eed2d2fcb269ee7ba62fc1c3de793553e60"
+}

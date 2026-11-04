@@ -38,6 +38,7 @@
 ## Lo que NO funciona (descartado con datos)
 - [[IFVG y SMC]] · [[ICT Sniper y PO3]] · [[Estrategias TradingView]] · [[Order flow y perfil de volumen]]
 - [[Oro por horario]] · [[Filtros y optimizaciones rechazadas]] · [[Machine learning]]
+- [[Campaña y cuenta, programa 5A-5F (27-oct a 4-nov)]]: tamaño de eval, retiro, presupuesto, pausas, contratos por volatilidad, partición de módulos entre plazas
 
 ## Resultados
 - [[Resultados NinjaTrader]]: validación real

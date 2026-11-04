@@ -32,6 +32,16 @@
 //   series is added and every order is submitted to it (SampleIntrabarBacktest), with explicit bracket orders 'StopX' / 'TargetX' on that
 //   series instead of SetStopLoss / SetProfitTarget (those stay on the primary series). Backtest only: at State.Realtime the orders go back
 //   to the 1-minute series, except on the Playback connection (bracket test), where the strategy clock is the replayed bar time (NowClock()).
+// v4.4 (2026-10-29 .. 11-04, code review + fronts 5E / 5F; trades of the backtest unchanged except ICT x2 -> x1):
+//   - clock check: session template and US daylight-saving rule (alert only); open risk at the stops and the real-account risk lines
+//     (lots per module, risk cap, day stops, eval target with consistency) on the panel; statuses in Spanish.
+//   - live safety (State.Realtime only): double exit / overfill and lots without owner -> flatten, escalation to Account.Flatten and
+//     stop after 3 bars; one working exit per module, retries only of this trade's exit and only with account = strategy; unknown
+//     prop state (missing or stale state file) -> funded risk cap on; override sanity checks; STOPPED WITH AN OPEN POSITION alert.
+//   - edge monitor: the saved state is continued with the days the loaded history closed (no reset after a restart), a new account
+//     takes the state of another real account with the same profile and calibration, atomic save.
+// SOURCE OF TRUTH since 2026-11-04: this file. The v4.3 -> v4.4 patch chain is archived in archive/patches (README there, verified by
+//   tools/verify_patch_chain.py). Edit this file directly, then run tools/nt8_stub/check.sh and tools/run_tests.sh before F5 on the PC.
 // ------------------------------------------------------------------------------------------------
 #region Using declarations
 using System;
@@ -86,6 +96,8 @@ namespace NinjaTrader.NinjaScript.Strategies
 			public int OpenQty, RejToday;
 			public double FixTgt = double.NaN; public bool StructStop, WinHas, Six; public double WinH, WinL, RvolMax;	// six-year modules (2026-10-16)	// lots still open (multi-lot entries close in parts), rejected orders this session
 			// explicit brackets (FillSeries Tick1 / Second1, v4): the levels the Set* calls would have used, the working orders, a market exit waiting for their cancel
+			public double RStopV = double.NaN; public bool RStopPx;	// panel open risk only (patch_open_risk.py): the stop level of the last BracketStop call
+			public Order ExitOrd; public int ExitBar = -1, ExitTries, TradeNo, ExitTrade; public bool ExitAgain, ExitWarned;	// patch_live_safety.py: the module's last exit order (live only)
 			public bool XStopPrice, XTgtPrice, XExitPending; public double XStopV = double.NaN, XTgtV = double.NaN; public Order XStop, XTgt; public int XExitQty, XExitBar = -1; public string XExitSig;
 		}
 		private List<Mod> mods;
@@ -94,7 +106,8 @@ namespace NinjaTrader.NinjaScript.Strategies
 		private double e10aO, e10aH, e10aL, e10aC, e10bO, e10bH, e10bL, e10bC, close10 = double.NaN; private bool e10aHas, e10bHas, eng10Done;
 		private double volbUp = double.NaN, volbDn = double.NaN; private bool volbDone, volbTrendOnly, volbTrendBase; private double volbRBase = 2.0; private int volbTrades;
 		private List<Order> zombies = new List<Order>(); private int zombieCount;	// entry orders NinjaTrader never processed (PurgeStaleEntries)
-		private int orbFirstDir, orbFirstMin = 9999;
+		private int orbFirstDir, orbFirstMin = 9999;	// first ORB60 fill of the day (log only since S2 2026-10-27)
+		private int orbSigDir, orbSigMin = 9999;	// RAW ORB60 short signal of the day: low through OR low - 1 tick on a down-trend pullback day (MSEQS gate, research wrq_build b_mseq)
 		private int m11Dir, onSum, lonDir;	// confluence state (MOM11 direction, overnight modules ON07/REV06/LON)
 		private List<Mod> timeMods;
 		// six-year modules (2026-10-16): ENG26 (22-02 vs 02-06 4H engulf at 09:30), ORFAIL (failed 15-min ORB), CAM3 (Camarilla L3/H3 fade)
@@ -102,12 +115,13 @@ namespace NinjaTrader.NinjaScript.Strategies
 		private double e26aO, e26aH, e26aL, e26aC; private bool e26aHas;
 		private double sVwPv, sVwV;	// session VWAP since 18:00 (CA04V)
 		private double rvAcc; private bool rvDone; private List<double> rvHist = new List<double>();	// RTH volume 09:30-10:59 (RV11)
-		private double orfH, orfL, orfExt, orfSl, orfTp; private int orfBrk, orfBi, orfSig; private bool orfHas, orfReady, orfDone;
-		private double camLev, camExt, camSl, camTp; private int camSide, camBr = -1, camSig; private bool camDone = true;
+		private double orfH, orfL, orfExt, orfSl, orfTp; private int orfBrk, orfBi, orfSig, orfPend, orfPendBar = -1; private bool orfHas, orfReady, orfDone;	// orfPend: signal deferred by an opposite working order, retried once on the next bar (S2 2026-10-27)
+		private double camLev, camExt, camSl, camTp; private int camSide, camBr = -1, camSig, camPend, camPendBar = -1; private bool camDone = true;
 		#endregion
 
 		#region Fields
 		private TimeZoneInfo etZone;
+		private int clockWarnDay = -1, clockHistCount; private bool clockHistWarned;	// patch_clock_check.py: clock check state
 		private SimpleFont dashFont;
 		private bool badTimeframe;
 		private int fillCfg, fillBip;		// fillCfg = series configured for the orders (0 = 1-minute bars as always, 2 = FillSeries Tick1 / Second1);
@@ -146,6 +160,7 @@ namespace NinjaTrader.NinjaScript.Strategies
 		private double rH, rL; private bool rHas; private int lonStage;
 		private double[] lvl = new double[6]; private bool[] taken = new bool[6]; private bool levelsReady;
 		private bool[] ictAct = new bool[2]; private double[] ictExt = new double[2]; private int[] ictExtBar = new int[2];
+		private int ictPendDir, ictPendBar = -1, ictPendExp, ictPendQty; private double ictPendLim, ictPendStop, ictPendExtP;	// ICT setup deferred by an opposite working order: limit placed on the next 1-minute bar (S2 2026-10-27)
 		private int ictTrades, ictExpiry; private double ictExtPend;
 		private int flattenBar = -1;
 		private double rsiUp = double.NaN, rsiDn = double.NaN, rsiVal = 50; private int rsiTrades;
@@ -166,10 +181,62 @@ namespace NinjaTrader.NinjaScript.Strategies
 			if (acct == strat) { desyncBars = 0; return; }
 			if (++desyncBars < 2) return;
 			desyncHalt = true;
-			try { Account.Flatten(new[] { Instrument }); } catch (Exception ex) { Print("NQMaster | account flatten failed: " + ex.Message); }
-			Warn("nqm_desync", string.Format("NQMaster | ACCOUNT / STRATEGY POSITION MISMATCH for 2 bars: account {0}, strategy {1} ({2}). The account position and orders of this instrument were closed and the strategy stops. Check the Positions / Orders tabs, then enable it again.", acct, strat, Instrument.FullName));
+			try { Account.Flatten(new[] { Instrument }); } catch (Exception ex) { flatFail = true; Print("NQMaster | account flatten failed: " + ex.Message); }
+			if (flatFail) Warn("nqm_flatfail2", "NQMaster | FLATTEN FAILED on " + Instrument.FullName + ": the account position may still be open and the strategy stops. Close it by hand NOW (Positions tab).");	// patch_live_safety.py v4
+			else Warn("nqm_desync", string.Format("NQMaster | ACCOUNT / STRATEGY POSITION MISMATCH for 2 bars: account {0}, strategy {1} ({2}). The account position and orders of this instrument were closed and the strategy stops. Check the Positions / Orders tabs, then enable it again.", acct, strat, Instrument.FullName));
 			try { SetState(State.Terminated); } catch { }
 		}
+		// patch_live_safety.py (code review 2026-10-29): lots the strategy holds that no module owns (a double exit / overfill reverses the position
+		// with no stop, and the account sync check cannot see it because account and strategy agree) -> 2 bars -> alert and flatten. Live only.
+		private void LotOwnershipCheck()
+		{
+			if (State != State.Realtime || desyncHalt || mods == null) return;
+			int strat = SignedQty(Position), own = 0;
+			foreach (Mod m in mods) if (m.InTrade && m.OpenQty > 0) own += (m.Dir != 0 ? m.Dir : Math.Sign(strat)) * m.OpenQty;
+			if (own == strat) { ownBars = 0; return; }
+			if (++ownBars < 2) return;
+			ownBars = 0;
+			if (!hedgeFlat) Warn("nqm_owner", string.Format("NQMaster | LOTS WITHOUT OWNER for 2 bars: modules {0} ({2}), strategy {1} -> flattening this instrument (a double exit or an overfill left lots without a stop)", own, strat, OwnerList()));
+			hedgeFlat = true; hedgeWhy = "lots without owner";
+		}
+		private double ThrOv() { return thrOvBad ? 0 : PropThresholdOverride; }	// patch_live_safety.py v3
+		private string OwnerList() { StringBuilder b = new StringBuilder(); foreach (Mod m in mods) if (m.InTrade && m.OpenQty > 0) b.Append(m.Sig + ":" + (m.Dir * m.OpenQty) + " "); return b.Length > 0 ? b.ToString().TrimEnd() : "none"; }
+		// patch_live_safety.py v2: an exit suppressed because the previous one was still working is retried once that one is done; an exit working
+		// for 3 bars (not filled, not cancelled) is reported. Live only.
+		private void ExitRetries()
+		{
+			if (State != State.Realtime || desyncHalt || mods == null) return;
+			foreach (Mod m in mods)
+			{
+				if (Working(m.ExitOrd))
+				{
+					if (!m.ExitWarned && m.ExitBar >= 0 && CurrentBars[0] - m.ExitBar >= 3) { m.ExitWarned = true; Warn("nqm_exitstuck", string.Format("NQMaster | {0} exit order working for 3 bars without a fill: check the Orders tab", m.Sig)); }
+					continue;
+				}
+				m.ExitWarned = false;
+				if (!m.InTrade || m.OpenQty <= 0) { m.ExitAgain = false; continue; }
+				bool dead = m.ExitOrd != null && m.ExitTrade == m.TradeNo && (m.ExitOrd.OrderState == OrderState.Cancelled || m.ExitOrd.OrderState == OrderState.Rejected);	// v3; v4: this trade's exit only
+				if (dead && m.ExitTries >= 2)
+				{
+					if (m.ExitTries == 2) { m.ExitTries = 3; Warn("nqm_exitdead", string.Format("NQMaster | {0} exit cancelled / rejected 3 times and {1} lots still open: disable the strategy, then close them by hand", m.Sig, m.OpenQty)); }
+					m.ExitAgain = false; continue;
+				}
+				if (dead)
+				{
+					// v4: an external flatten (button, the firm, the broker) cancels the exit with the account already flat: a retry would open a reverse position
+					bool agree = false; try { agree = AccountSyncGuard && desyncBars == 0 && SignedQty(PositionAccount) == SignedQty(Position); } catch { }
+					if (!agree)
+					{
+						if (!AccountSyncGuard && m.ExitTries < 3) { m.ExitTries = 3; Warn("nqm_exitdead", string.Format("NQMaster | {0} exit cancelled / rejected and not retried (the account sync guard is off, so the account position is not checked): look at the account and close {1} lots by hand if they are still open", m.Sig, m.OpenQty)); }
+						m.ExitAgain = false; continue;
+					}
+					m.ExitTries++; m.ExitAgain = false; ExitModule(m, "exit retried (the previous exit was " + m.ExitOrd.OrderState + ")");
+				}
+				else if (m.ExitAgain) { m.ExitAgain = false; ExitModule(m, "exit retried (the previous exit was still working)"); }
+			}
+		}
+		// v3: the module is flat or starts a new trade: nothing of the previous trade's exit is retried (a still-working exit stays watched)
+		private void ExitDone(Mod m) { m.TradeNo++; if (!Working(m.ExitOrd)) m.ExitOrd = null; m.ExitAgain = false; m.ExitTries = 0; }
 		// H2: real session end (holidays / half days end at 13:00-13:15 ET; NinjaTrader's trading-hours template knows them)
 		private void SessionBounds()
 		{
@@ -184,6 +251,7 @@ namespace NinjaTrader.NinjaScript.Strategies
 			}
 			catch { }
 			if (shortSession) Log(string.Format("short session (holiday / half day): the market closes {0:00}:{1:00} ET{2}", sessEndMin / 60, sessEndMin % 60, SkipShortSessions ? " - no new entries this session" : ""));
+			ClockCheck();
 			rollHalt = State == State.Realtime && RollDue();
 			if (rollHalt) Warn("nqm_roll", "NQMaster | ROLL DATE reached for " + Instrument.FullName + ": no new entries. Move the strategy to the next contract (same settings).");
 		}
@@ -202,7 +270,7 @@ namespace NinjaTrader.NinjaScript.Strategies
 			AtrStartMax = 0; EdgeMonitorPause = false; EdgeK = 0; EdgeH = 0; MaxDrawdown = 0; VolbReArm = false;
 			UseMom1130 = false; UseRsi2 = false; UseLf0315 = false; UseCa04v = false; UseGd03 = false; UseEng26 = false; UseEng10 = false; UseLateFh = false;
 			PullbackMaxRet = 0.44; StopCapAtr = 0.35; OrbPriorCloseAtr = 0.10; VolbBreakEven = true; MomAgreement = true; VolbTrendLastEntry = 1047; MinStopAtr = 0.10;
-			UseContextRules = true; UseConfluence = true; IctMultiplier = 2; Vw13Wide = true; Cpi09Multiplier = 4; Mom1030Multiplier = 4;
+			UseContextRules = true; UseConfluence = true; IctMultiplier = 1; Vw13Wide = true; Cpi09Multiplier = 4; Mom1030Multiplier = 4;
 		}
 		private void ApplyPreset()
 		{
@@ -303,7 +371,7 @@ namespace NinjaTrader.NinjaScript.Strategies
 				DateTime ex = Instrument.Expiry; if (ex.Year < 2000) return false;
 				DateTime first = new DateTime(ex.Year, ex.Month, 1);
 				DateTime roll = first.AddDays(((int)DayOfWeek.Friday - (int)first.DayOfWeek + 7) % 7 + 14 - 8);
-				return ToEt(NowClock()).Date >= roll.Date;
+				DateTime etn = ToEt(NowClock()); return (etn.Hour >= 18 ? etn.Date.AddDays(1) : etn.Date) >= roll.Date;	// patch_live_safety.py: the session's trading day (it stopped one session late)
 			}
 			catch { return false; }
 		}
@@ -392,6 +460,7 @@ namespace NinjaTrader.NinjaScript.Strategies
 				StartBehavior = StartBehavior.WaitUntilFlat;
 				TimeInForce = TimeInForce.Gtc;
 				RealtimeErrorHandling = RealtimeErrorHandling.IgnoreAllErrors;	// rejections handled in OnOrderUpdate
+				IgnoreOverfill = true;	// patch_live_safety.py: an overfill does not stop the strategy (that would cancel the other modules' stops): LotOwnershipCheck flattens
 				StopTargetHandling = StopTargetHandling.PerEntryExecution;
 				BarsRequiredToTrade = 20;
 				IsInstantiatedOnEachOptimizationIteration = true;
@@ -400,7 +469,7 @@ namespace NinjaTrader.NinjaScript.Strategies
 				UseOrb = true; OrbRangeMin = 60; OrbTargetR = 0.6; OrbPullbackFilter = true; PullbackMaxRet = 0.44; StopCapAtr = 0.35;
 				UseMseq = true; UseCrt = true; UseMom11 = true; UseMom1130 = false; UseRsi2 = false; UseOrb90 = true; UseMseqShort = true; UseMom13 = true; UseMom1030 = true; UseOn07 = true; UseRev06 = true; UseLon = true; UseIct = true;
 				Contracts = 1; FlattenTime = 1556; SkipFomc = true;
-				AdaptiveSize = false; SizeHigh = 2; SizeLow = 1; SizeDownDrawdown = 600; IctMultiplier = 2; UseConfluence = true; UseContextRules = true; UseVw13 = true; UseVolBreak = true; UseLate15 = true; UseEng10 = false; UseLateFh = false; Vw13Wide = true; UseNf05 = true; UseLf0315 = false; UseLf06 = true; UseLf0430 = true; NightOnWr70 = false; UseCpi09 = true; CpiDates = ""; Cpi09Multiplier = 4; Mom1030Multiplier = 4; EvalHighWrMultiplier = 0;
+				AdaptiveSize = false; SizeHigh = 2; SizeLow = 1; SizeDownDrawdown = 600; IctMultiplier = 1; UseConfluence = true; UseContextRules = true; UseVw13 = true; UseVolBreak = true; UseLate15 = true; UseEng10 = false; UseLateFh = false; Vw13Wide = true; UseNf05 = true; UseLf0315 = false; UseLf06 = true; UseLf0430 = true; NightOnWr70 = false; UseCpi09 = true; CpiDates = ""; Cpi09Multiplier = 4; Mom1030Multiplier = 4; EvalHighWrMultiplier = 0;
 				SixYearModules = true; UseCa04v = false; UseSo04 = true; UseGd03 = false; UseRv11 = true; UseEng26 = false; UseOrFail = true; UseCam3 = true;	// research/mine/six_oos.py (2026-10-19): only the four that held on 2010-19 (never used to choose them)
 				FomcDates = "2024-01-31,2024-03-20,2024-05-01,2024-06-12,2024-07-31,2024-09-18,2024-11-07,2024-12-18,2025-01-29,2025-03-19,2025-05-07,2025-06-18,2025-07-30,2025-09-17,2025-10-29,2025-12-10,2026-01-28,2026-03-18,2026-04-29,2026-06-17,2026-07-29,2026-09-16,2026-10-28,2026-12-09";
 				StartBalance = 50000; EvalTarget = 0; MaxDrawdown = 0; DrawdownBuffer = 250; DailyLossLimit = 0; DailyLossPerContract = 0; MinAtrPoints = 150;
@@ -419,6 +488,7 @@ namespace NinjaTrader.NinjaScript.Strategies
 			}
 			else if (State == State.Configure)
 			{
+				IgnoreOverfill = true;	// patch_live_safety.py v2: also here (a template could carry another value); LotOwnershipCheck handles an overfill
 				AddDataSeries(BarsPeriodType.Minute, 5);
 				// experiment 01 (docs/PLAN_2026-10-26.md): optional intrabar series (index 2) that receives every order, as in NinjaTrader's
 				// SampleIntrabarBacktest. Backtest realism only: the 1-minute logic is untouched, fills happen on ticks / seconds. Never put
@@ -489,6 +559,7 @@ namespace NinjaTrader.NinjaScript.Strategies
 				int hq = Math.Max(1, Qty());
 				CycleGoLive();
 				liveStartPnl = netPnl; liveStartTrades = totalTrades; liveStart = ToEt(Times[0][0]);
+				EdgeRestore();	// patch_edge_restore.py: before PropGoLive, whose session start applies a restored fallback to the modules
 				PropGoLive();
 				int lq = Math.Max(1, Qty());	// code review 2026-10-17 M1: entries carried over from history keep the backtest size; re-size them to the live cushion's size
 				if (lq != hq) foreach (Mod m in mods)
@@ -501,18 +572,31 @@ namespace NinjaTrader.NinjaScript.Strategies
 				{
 					foreach (Mod m in mods) if (m.Parked) m.ParkQty = Math.Max(1, (int)Math.Round(m.ParkQty * (double)lq / hq));
 					if (pend5 != null) pend5Qty = Math.Max(1, (int)Math.Round(pend5Qty * (double)lq / hq));
+					if (ictPendDir != 0) ictPendQty = Math.Max(1, (int)Math.Round(ictPendQty * (double)lq / hq));
 				}
 				edgeDayQty = Qty(); statQty = Qty();	// review L14
+				foreach (Mod m in mods) { m.ExitOrd = null; m.ExitAgain = false; m.ExitWarned = false; }	// patch_live_safety.py v2: an exit from the history is not a live order
 				syncArmed = false; desyncBars = 0; NewsListCheck();
 				if (atrCount < AtrMin || rthDaysSeen < WarmupDays) Warn("nqm_warmup", string.Format("NQMaster | WARNING: only {0} RTH days loaded, the warm-up needs {1}: modules stay idle until then (set Days to load >= 45).", rthDaysSeen, WarmupDays));
 				rollHalt = RollDue(); if (rollHalt) Warn("nqm_roll", "NQMaster | ROLL DATE reached for " + Instrument.FullName + ": no new entries. Move the strategy to the next contract (same settings).");
-				Log(string.Format("LIVE on {0} | profile {1} | contracts {2} | prop {3} | max open contracts {4} | account sync guard {5}", Instrument.FullName, Profile, Contracts, PropMode, MaxOpenContracts, AccountSyncGuard ? "on" : "off"));
-				wentLive = true; PrintModuleReport("loaded history"); EdgeRestore();
+				ClockCheck();	// patch_clock_check.py: the first live session started in history, where Warn only prints
+				Log(string.Format("LIVE on {0} | profile {1} | contracts {2} | prop {3} | max open contracts {4} | account sync guard {5} | IgnoreOverfill {6}", Instrument.FullName, Profile, Contracts, PropMode, MaxOpenContracts, AccountSyncGuard ? "on" : "off", IgnoreOverfill));
+				wentLive = true; PrintModuleReport("loaded history");
 			}
 			else if (State == State.Terminated)
 			{
+				if (clockHistCount > 1) Print(string.Format("NQMaster | CLOCK CHECK failed on {0} sessions of this run (the first one is in the Output)", clockHistCount));
 				if (presetSnap != null && cy != null) { RestorePreset(presetSnap); PropMode = realMode; }	// review M4: never leave the simulated phase in the properties
-				try { if (CrossAccountGuard && PosFile != null && File.Exists(PosFile)) File.Delete(PosFile); } catch { }
+				bool acctOpen = false;	// patch_live_safety.py: stopping with an open position may cancel its stop / target
+				try { acctOpen = wentLive && PositionAccount != null && PositionAccount.MarketPosition != MarketPosition.Flat; } catch { }
+				bool openReal = acctOpen && (!desyncHalt || flatFail);	// v4: after a halt the flatten is in flight; if it failed, alert
+				if (openReal)
+				{
+					string om = "NQMaster | STOPPED WITH AN OPEN POSITION on " + Instrument.FullName + ": NinjaTrader may have cancelled its stop / target. Check the Orders tab and protect or close the position NOW.";
+					Print(om);
+					try { Alert("nqm_stop_open", Priority.High, om, NinjaTrader.Core.Globals.InstallDir + @"\sounds\Alert1.wav", 0, Brushes.Red, Brushes.White); } catch { }
+				}
+				try { if (!acctOpen && CrossAccountGuard && PosFile != null && File.Exists(PosFile)) File.Delete(PosFile); } catch { }	// v4: kept while the account is open
 				if (zombieCount > 0)
 					Print(string.Format("NQMaster | {0} stale entry order(s) were dropped during this run (Output lines 'STALE ORDER'). Before this fix each one blocked a module and the opposite direction for good.", zombieCount));
 				if (UseOrderFlowBoost && mods != null)
@@ -673,8 +757,23 @@ namespace NinjaTrader.NinjaScript.Strategies
 			CrossAccountPublish();
 			CheckAccountSync();
 			if (desyncHalt) return;
+			LotOwnershipCheck();
+			if (propSaveDue && State == State.Realtime && Position.MarketPosition == MarketPosition.Flat) { propSaveDue = false; if (!propStateUnknown) PropSave(curSessDay); }	// v2: last balance seen (stale-file check)
 			CrossAccountCancelOpp();
-			if (hedgeFlat) { if (Position.MarketPosition == MarketPosition.Flat) hedgeFlat = false; else FlattenAll("cross-account hedge guard"); }
+			if (hedgeFlat)
+			{
+				if (Position.MarketPosition == MarketPosition.Flat) { hedgeFlat = false; hedgeBars = 0; hedgeWhy = null; }
+				else if (State == State.Realtime && ++hedgeBars >= 3)	// patch_live_safety.py v3: the managed exits did not get flat in 3 bars -> stop like the sync guard
+				{
+					desyncHalt = true;	// no more managed exits: with the account already flat they would open a reverse position
+					try { Account.Flatten(new[] { Instrument }); } catch (Exception ex) { flatFail = true; Print("NQMaster | account flatten failed: " + ex.Message); }
+					if (flatFail) Warn("nqm_flatfail2", "NQMaster | FLATTEN FAILED on " + Instrument.FullName + ": the account position may still be open and the strategy stops. Close it by hand NOW (Positions tab).");
+					else Warn("nqm_flatfail", string.Format("NQMaster | the strategy could not get flat in 3 bars ({0}): the account position and orders of {1} were closed directly and the strategy stops. Check the Positions and Orders tabs, then enable it again.", hedgeWhy ?? "cross-account hedge guard", Instrument.FullName));
+					try { SetState(State.Terminated); } catch { }
+					return;
+				}
+				else FlattenAll(hedgeWhy ?? "cross-account hedge guard");
+			}
 
 			if (Bars.IsFirstBarOfSession)
 			{
@@ -758,6 +857,7 @@ namespace NinjaTrader.NinjaScript.Strategies
 
 			// exits: module time exits, London exit, flatten
 			if (closeMin >= FlatMin && closeMin < 18 * 60) { FlattenAll(shortSession ? "early close (holiday / half day)" : "end of day"); UpdateDashboard(); return; }
+			if (!hedgeFlat && flattenBar < CurrentBars[0] - 1) ExitRetries();	// patch_live_safety.py v3: after this bar's flattens (a retry plus a flatten = a double exit); v4: nor the bar after one
 			foreach (Mod m in timeMods)
 				if (m.InTrade && m.MaxHold > 0 && CurrentBars[0] - m.EntryBar >= m.MaxHold) ExitModule(m, "time exit");
 			if (rsi.InTrade && CurrentBars[0] - rsi.EntryBar >= rsi.MaxHold) ExitModule(rsi, "time exit");
@@ -781,7 +881,13 @@ namespace NinjaTrader.NinjaScript.Strategies
 
 			bool canTrade = CanTrade();
 			if (!canTrade) { CancelAllEntries(); UpdateDashboard(); return; }
-			if (LateBar(Time[0])) { Log("bar processed late (session break / data gap): no new entries on it"); UpdateDashboard(); return; }
+			if (LateBar(Time[0]))
+			{
+				Log("bar processed late (session break / data gap): no new entries on it");
+				if (++lateRun == 3) Warn("nqm_late", "NQMaster | 3 bars in a row processed late (> 120 s after the bar): no new entries. Synchronize the Windows clock and check the data feed.");	// patch_live_safety.py
+				UpdateDashboard(); return;
+			}
+			lateRun = 0;
 			// MSEQ / MSEQS deferred by an opposite stop/limit order: one retry on the next 1-minute bars (research enters them at market)
 			if (pend5 != null)
 			{
@@ -792,12 +898,33 @@ namespace NinjaTrader.NinjaScript.Strategies
 					if (po != null) pend5.Entry = po; Log(pend5.Sig + " entered after the deferral"); pend5 = null;
 				}
 			}
+			if (ictPendDir != 0)
+			{
+				int pdi = ictPendDir;
+				if (ict.InTrade || Working(ict.Entry) || ict.Parked || CurrentBars[0] > ictPendBar + 5 || CurrentBars[1] >= ictPendExp || (pdi == -1 ? High[0] > ictPendExtP : Low[0] < ictPendExtP)) { ictPendDir = 0; Log("ICT deferred setup dropped"); }
+				else if (CurrentBars[0] > ictPendBar)
+				{
+					if (DirectionAllowed(pdi))
+					{
+						ictPendDir = 0; ict.Dir = pdi; ictExtPend = ictPendExtP; ictExpiry = ictPendExp; ArmPriceBracket(ict, pdi, ictPendStop);
+						int iqo = OfApply(ict, ictPendQty, pdi);
+						Order ir = iqo <= 0 ? null : (pdi == 1 ? EnterLongLimit(fillBip, true, iqo, ictPendLim, ict.Sig) : EnterShortLimit(fillBip, true, iqo, ictPendLim, ict.Sig));
+						if (ir != null) { ict.Entry = ir; Log(string.Format("ICT {0} LIMIT @ {1} | SL {2} (after the deferral)", pdi == 1 ? "BUY" : "SELL", Fmt(ictPendLim), Fmt(ictPendStop))); }
+					}
+					else if (!lastDeferred) { ictPendDir = 0; ict.Dir = pdi; ictExtPend = ictPendExtP; ictExpiry = ictPendExp; ArmPriceBracket(ict, pdi, ictPendStop); ParkSetup(ict, true, ictPendLim, ictPendQty); }	// blocked by an opposite POSITION: parked, as the direct path
+				}
+			}
 			ManageParked(openMin, closeMin);
 			if (UseOrderFlowBoost) OfRefresh();
 
 			// ---- modules on the 1-minute series
 			foreach (Mod o in new Mod[] { orb, orb2 })
 				if (o.On && inRth && etDate == rthDay && o.OrReady && closeMin >= Math.Max(630, RthOpen + o.Range)) ManageOrb(o, closeMin);
+			// S2 2026-10-27: MSEQS is gated on the RAW ORB60 short signal (research b_mseq: the first ORB60 short of nt_v3_replica with only the
+			// pullback filter), i.e. the first bar whose low trades through OR low - 1 tick on a down-trend pullback day inside the ORB window,
+			// whether or not ManageOrb then skipped the day (ORBt prior-close filter, stop size) or the order filled. Needs ORB60 on with its 60-minute
+			// range (the OR is only tracked for modules that are on); with ORB60 off MSEQS never opens, as before this change
+			if (orbSigDir == 0 && orb.On && inRth && etDate == rthDay && orb.OrReady && pullbackDay && trendDir == -1 && closeMin >= Math.Max(630, RthOpen + orb.Range) && closeMin < 780 && Low[0] <= orb.OrL - TickSize) { orbSigDir = -1; orbSigMin = openMin; Log("ORB60 raw short signal (MSEQS gate) @ " + Fmt(orb.OrL - TickSize)); }
 			foreach (Mod m in timeMods)
 			{
 				if (m.Retry) { m.Retry = false; TimeEntry(m); if (lastDeferred) m.Retry = false; continue; }
@@ -809,8 +936,13 @@ namespace NinjaTrader.NinjaScript.Strategies
 			if (volb.On && inRth && etDate == rthDay) ManageVolb(openMin);
 			if (eng10.On) ManageEng10(openMin);
 			if (eng26.On && openMin == 929) Eng26Entry();
-			if (orfSig != 0) { int os = orfSig; orfSig = 0; SixEnter(orf, os, orfSl, orfTp); }
-			if (camSig != 0) { int cs = camSig; camSig = 0; SixEnter(cam3, cs, camSl, camTp); }
+			// S2 2026-10-27: a six-year signal deferred by DirectionAllowed (opposite stop order working, parked there) is retried once on the next
+			// 1-minute bar with the same stop / target, as TimeEntry and MSEQ do (dropped if that bar crossed the stop, as pend5: the research would have
+			// taken the trade at the signal close and lost 1R; NinjaTrader cannot place that fill); the research has no working orders and enters at once
+			if (orfSig != 0) { int os = orfSig; orfSig = 0; SixEnter(orf, os, orfSl, orfTp); if (lastDeferred) { orfPend = os; orfPendBar = CurrentBars[0]; } }
+			else if (orfPend != 0) { int os = orfPend; orfPend = 0; if (CurrentBars[0] != orfPendBar + 1) Log("ORFAIL deferred signal dropped (bar skipped)"); else if (os == 1 ? Low[0] <= orfSl : High[0] >= orfSl) Log("ORFAIL deferred signal dropped (stop crossed during the deferral)"); else { SixEnter(orf, os, orfSl, orfTp); if (!lastDeferred && Working(orf.Entry)) Log("ORFAIL entered after the deferral"); } }
+			if (camSig != 0) { int cs = camSig; camSig = 0; SixEnter(cam3, cs, camSl, camTp); if (lastDeferred) { camPend = cs; camPendBar = CurrentBars[0]; } }
+			else if (camPend != 0) { int cs = camPend; camPend = 0; if (CurrentBars[0] != camPendBar + 1) Log("CAM3 deferred signal dropped (bar skipped)"); else if (cs == 1 ? Low[0] <= camSl : High[0] >= camSl) Log("CAM3 deferred signal dropped (stop crossed during the deferral)"); else { SixEnter(cam3, cs, camSl, camTp); if (!lastDeferred && Working(cam3.Entry)) Log("CAM3 entered after the deferral"); } }
 			UpdateDashboard();
 		}
 
@@ -819,18 +951,18 @@ namespace NinjaTrader.NinjaScript.Strategies
 		{
 			sessOpen = Open[0]; rthOpenPx = double.NaN; vwPv = 0; vwV = 0;
 			onHas = lonHas = postHas = false; c1Has = c2Has = false; rHas = false; lonStage = 0; levelsReady = false;
-			ictAct[0] = ictAct[1] = false; ictTrades = 0;
+			ictAct[0] = ictAct[1] = false; ictTrades = 0; ictPendDir = 0;
 			orb.OrH = 0; orb.OrL = 0; orb.OrReady = false; orb.Armed = false; orb.Trades = 0;
 			orb2.OrH = 0; orb2.OrL = 0; orb2.OrReady = false; orb2.Armed = false; orb2.Trades = 0;
-			orbFirstDir = 0; orbFirstMin = 9999;
+			orbFirstDir = 0; orbFirstMin = 9999; orbSigDir = 0; orbSigMin = 9999;
 			foreach (Mod m in timeMods) { m.Done = false; m.Retry = false; m.AnchorPx = double.NaN; }
 			crt.Done = false; crt.Retry = false;
 			rsiTrades = 0;
 			volbDone = false; volbUp = double.NaN; volbDn = double.NaN; volbTrades = 0;
 			e26aHas = false; sVwPv = 0; sVwV = 0; foreach (Mod m in timeMods) m.WinHas = false;
-			orfHas = orfReady = orfDone = false; orfBrk = 0; orfSig = 0;
+			orfHas = orfReady = orfDone = false; orfBrk = 0; orfSig = 0; orfPend = 0;
 			// CAM3 levels: prior complete RTH close +- 1.1/4 of the prior RTH range, the side of the daily trend (research PIVOT_FADE CAM3)
-			camSig = 0; camBr = -1; camSide = trendDir; camDone = !(cam3 != null && cam3.On) || camSide == 0 || double.IsNaN(full1) || double.IsNaN(prevRthHigh) || double.IsNaN(todayAtr);
+			camSig = 0; camPend = 0; camBr = -1; camSide = trendDir; camDone = !(cam3 != null && cam3.On) || camSide == 0 || double.IsNaN(full1) || double.IsNaN(prevRthHigh) || double.IsNaN(todayAtr);
 			camLev = camDone ? double.NaN : full1 - camSide * (prevRthHigh - prevRthLow) * 1.1 / 4.0;
 			e10aHas = false; e10bHas = false; eng10Done = false; eng10Retry = false; close10 = double.NaN; rthFirstClose = double.NaN;
 			m11Dir = 0; onSum = 0; lonDir = 0;
@@ -1263,8 +1395,8 @@ namespace NinjaTrader.NinjaScript.Strategies
 			}
 
 			// ---- MSEQS: mirrored momentum sequence (bullish main candle + 5 falling bearish candles below its high), only on days
-			// where ORB60 has already entered SHORT (pullback down-trend day), 5m bar opening at/after that entry, 10:30-15:45
-			if (mseqs.On && !mseqs.InTrade && !Working(mseqs.Entry) && orbFirstDir == -1 && openMin >= orbFirstMin && openMin >= 630 && openMin < 945)
+			// where the RAW ORB60 short signal already happened (pullback down-trend day), from the 5m bar that contains it, 10:30-15:45
+			if (mseqs.On && !mseqs.InTrade && !Working(mseqs.Entry) && orbSigDir == -1 && closeMin > orbSigMin && openMin >= 630 && openMin < 945)	// S2: raw signal; the 5-minute bar that contains it is allowed (last 1-minute bar >= signal bar)
 			{
 				int n = 5; bool ok = Closes[1][n] > Opens[1][n];
 				double mainHigh = Highs[1][n];
@@ -1341,7 +1473,7 @@ namespace NinjaTrader.NinjaScript.Strategies
 				if (!trig) continue;
 				ictAct[s] = false;
 				int d = s == 0 ? -1 : 1;
-				if (ict.InTrade || Working(ict.Entry) || ict.Parked || ictTrades >= 3 || d != trendDir || atrCount < AtrMin) continue;
+				if (ict.InTrade || Working(ict.Entry) || ict.Parked || ictPendDir != 0 || ictTrades >= 3 || d != trendDir || atrCount < AtrMin) continue;
 				double stop = d == -1 ? ictExt[s] + TickSize : ictExt[s] - TickSize;
 				double lim = Instrument.MasterInstrument.RoundToTickSize(cisd);
 				if ((d == -1 && lim <= Closes[1][0]) || (d == 1 && lim >= Closes[1][0])) continue;
@@ -1351,7 +1483,9 @@ namespace NinjaTrader.NinjaScript.Strategies
 				if (TooTight(ict.Sig, risk, todayAtr) || TooBig(ict.Sig, risk, iq)) continue;
 				if (!DirectionAllowed(d))
 				{
-					if (lastDeferred) ictAct[s] = true;
+					// S2 2026-10-27: deferred by an opposite working order -> keep the setup and place the limit on the next 1-minute bar (the research
+					// places it at this close); re-arming the 5-minute search required the trigger again and filled 9-26 min late or not at all
+					if (lastDeferred) { ictPendDir = d; ictPendLim = lim; ictPendStop = stop; ictPendExtP = ictExt[s]; ictPendExp = CurrentBars[1] + 20; ictPendQty = iq; ictPendBar = CurrentBars[0]; Log(string.Format("ICT {0} LIMIT @ {1} deferred to the next 1-minute bar", d == 1 ? "BUY" : "SELL", Fmt(lim))); }
 					else { ict.Dir = d; ictExtPend = ictExt[s]; ictExpiry = CurrentBars[1] + 20; ArmPriceBracket(ict, d, stop); ParkSetup(ict, true, lim, iq); }
 					continue;
 				}
@@ -1407,7 +1541,7 @@ namespace NinjaTrader.NinjaScript.Strategies
 		// until the cushion over the EOD-trailing threshold (day start) is >= FundedStepUpCushion ($3,000 = balance >= start + $3,100 once
 		// the threshold has locked at start + $100), then FundedStepUpContracts (2); back to Contracts below. Withdraw down to start + $6,100.
 		// $ per account per month (history / +1 tick / resampled): 3,888 / 3,592 / 3,336 vs 2,137 / 1,984 / 2,012 at 1 contract.
-		private bool StepUpOn { get { return PropMode == NQMasterPropMode.Funded && FundedStepUpCushion > 0 && !double.IsNaN(propCushion) && propCushion >= FundedStepUpCushion; } }
+		private bool StepUpOn { get { return PropMode == NQMasterPropMode.Funded && FundedStepUpCushion > 0 && !double.IsNaN(propCushion) && propCushion >= FundedStepUpCushion && !propStateUnknown; } }
 		// ---- size ladder (research/mine/ladder_plan.py, 2026-10-17, Federico: '$200 per day per account'): above the step-up cushion every further
 		// FundedLadderStep of day-start cushion adds one contract per module, up to FundedLadderMax; withdraw only above FundedPayoutAt so the
 		// cushion that carries the ladder stays in the account. MFFU 50K, Ultra + six-year modules + gold Robust, step-up 3,000 / step 3,000 / max 4,
@@ -1480,7 +1614,7 @@ namespace NinjaTrader.NinjaScript.Strategies
 			Log(string.Format("{0} skipped: stop {1:0.00} pts is inside the day's noise (< {2:0.00} x ATR {3:0.0})", who, stopPts, MinStopAtr, atr)); return true;
 		}
 		private bool RiskCapActive { get { return PropMode != NQMasterPropMode.Off && RiskCapPerContract > 0 && !double.IsNaN(propCushion)
-			&& propCushion < (PropMode == NQMasterPropMode.Eval ? EvalRiskCapCushion : FundedRiskCapCushion); } }
+			&& (propCushion < (PropMode == NQMasterPropMode.Eval ? EvalRiskCapCushion : FundedRiskCapCushion) || (propStateUnknown && PropMode == NQMasterPropMode.Funded)); } }	// patch_live_safety.py v2
 		private bool TooBig(string who, double stopPts, int qty)
 		{
 			if (!RiskCapActive || qty <= 0) return false;
@@ -1583,6 +1717,7 @@ namespace NinjaTrader.NinjaScript.Strategies
 		//  (3) every bar, own working entries opposite to another account's OPEN position are cancelled.
 		//  (4) an own entry that fills while another account holds the opposite position is flattened at once (+ Alert + log).
 		private int otherDirBar = -1; private bool otherLong, otherShort, otherPosLong, otherPosShort, hedgeFlat;
+		private int ownBars, lateRun, hedgeBars; private bool propStateUnknown, propSaveDue, thrOvBad, flatFail; private string hedgeWhy;	// patch_live_safety.py
 		private string PosDir { get { try { return Path.Combine(Core.Globals.UserDataDir, "nqmaster_positions"); } catch { return null; } } }
 		private string PosFile { get { string d = PosDir; return d == null ? null : Path.Combine(d, (HedgeGroup ?? "") + "_" + (Account != null ? Account.Name : "acct") + "_NQ.txt"); } }
 		private void CrossAccountPublish()
@@ -1592,9 +1727,11 @@ namespace NinjaTrader.NinjaScript.Strategies
 			{
 				Directory.CreateDirectory(PosDir);
 				int pos = Position.MarketPosition == MarketPosition.Long ? 1 : (Position.MarketPosition == MarketPosition.Short ? -1 : 0);
-				foreach (Mod m in mods) if (pos == 0 && m.InTrade && m.Dir != 0) pos = m.Dir;	// fill not yet in Position
+				bool preSync = AccountSyncGuard && !syncArmed;	// patch_live_safety.py v2: before the sync guard is armed the strategy's (historical, virtual) position is not the account's
+				if (preSync) { try { pos = Math.Sign(SignedQty(PositionAccount)); } catch { } }
+				else foreach (Mod m in mods) if (pos == 0 && m.InTrade && m.Dir != 0) pos = m.Dir;	// fill not yet in Position
 				bool l = pos == 1, sh = pos == -1;
-				foreach (Mod m in mods)
+				if (!preSync) foreach (Mod m in mods)
 				{
 					if (m.InTrade) { if (m.Dir == 1) l = true; else if (m.Dir == -1) sh = true; }
 					if (Working(m.Entry) && !zombies.Contains(m.Entry)) { if (m.Dir == 1) l = true; else if (m.Dir == -1) sh = true; }
@@ -1710,80 +1847,195 @@ namespace NinjaTrader.NinjaScript.Strategies
 		private string EdgeFile { get { try { return Path.Combine(Core.Globals.UserDataDir, "nqmaster_edge_" + (Account != null ? Account.Name : "acct") + ".txt"); } catch { return null; } } }
 		private void EdgeSave()
 		{
-			if (State != State.Realtime || !EdgeMonitor || EdgeFile == null) return;
+			if (State != State.Realtime || !EdgeMonitor || EdgeFile == null || edgeNoSave) return;	// patch_edge_restore.py: edgeNoSave = own file unreadable
 			try
 			{
-				File.WriteAllText(EdgeFile, string.Join(";", new string[] { Profile.ToString(), edgeLastDate.ToString(CultureInfo.InvariantCulture), edgeS.ToString("R", CultureInfo.InvariantCulture),
+				string edgeTmp = EdgeFile.Substring(0, EdgeFile.Length - 4) + ".tmp";
+				File.WriteAllText(edgeTmp, string.Join(";", new string[] { Profile.ToString(), edgeLastDate.ToString(CultureInfo.InvariantCulture), edgeS.ToString("R", CultureInfo.InvariantCulture),
 					edgeDays.ToString(CultureInfo.InvariantCulture), edgeAlarm ? "1" : "0", edgeFbLeft.ToString(CultureInfo.InvariantCulture),
-					edgeFbOff == null ? "" : string.Join(" ", edgeFbOff.ToArray()), edgeWarned ? "1" : "0", EdgeMonitorStart ?? "" }));
+					edgeFbOff == null ? "" : string.Join(" ", edgeFbOff.ToArray()), edgeWarned ? "1" : "0", EdgeMonitorStart ?? "", edgeK.ToString("R", CultureInfo.InvariantCulture), edgeH.ToString("R", CultureInfo.InvariantCulture) }));
+				try { if (File.Exists(EdgeFile)) File.Replace(edgeTmp, EdgeFile, null); else File.Move(edgeTmp, EdgeFile); }	// patch_edge_restore.py: atomic (no truncated file after a cut)
+				catch (Exception ex) { Print("NQMaster | edge monitor: atomic save failed (" + ex.Message + "), copying directly"); File.Copy(edgeTmp, EdgeFile, true); }
 			}
 			catch { }
+		}
+		// patch_edge_restore.py: days the loaded history closed (date key, z), the first day it covers, and the restore's flags
+		private List<int> edgeHistD = new List<int>(); private List<double> edgeHistZ = new List<double>(); private int edgeCoverFrom; private bool edgeNoSave, edgeReplay;
+		private static DateTime KeyDate(int k) { return new DateTime(k / 10000, k / 100 % 100, k % 100); }
+		// same profile, start date and calibration (k, h: fields 10-11; a file of the old 9-field format only counts for this account itself)
+		private bool EdgeFits(string[] p, bool other)
+		{
+			if (p == null || p.Length < 9 || p[0] != Profile.ToString() || p[8] != (EdgeMonitorStart ?? "")) return false;
+			if (p.Length < 11) return !other;
+			double k, h;
+			if (!double.TryParse(p[9], NumberStyles.Any, CultureInfo.InvariantCulture, out k) || !double.TryParse(p[10], NumberStyles.Any, CultureInfo.InvariantCulture, out h)) return false;
+			return Math.Abs(k - edgeK) < 1e-6 && Math.Abs(h - edgeH) < 1e-6;
+		}
+		// all fields or nothing (a half-read file never mixes with the history rebuild)
+		private static bool EdgeParse(string[] p, out int d, out double sv, out int days, out bool alarm, out int fb, out bool warned, out List<string> off)
+		{
+			d = 0; sv = 0; days = 0; alarm = false; fb = 0; warned = false; off = new List<string>();
+			if (p == null || p.Length < 9) return false;
+			if (!int.TryParse(p[1], NumberStyles.Integer, CultureInfo.InvariantCulture, out d) || !double.TryParse(p[2], NumberStyles.Any, CultureInfo.InvariantCulture, out sv)
+				|| !int.TryParse(p[3], NumberStyles.Integer, CultureInfo.InvariantCulture, out days) || !int.TryParse(p[5], NumberStyles.Integer, CultureInfo.InvariantCulture, out fb)) return false;
+			DateTime dt;
+			if (d != 0 && (d < 20000101 || d > 21000101 || !DateTime.TryParseExact(p[1], "yyyyMMdd", CultureInfo.InvariantCulture, DateTimeStyles.None, out dt))) return false;	// v3: no impossible dates (20260231); v4: 2000-2100
+			if (double.IsNaN(sv) || double.IsInfinity(sv) || sv < 0 || days < 0 || fb < 0) return false;	// v3: a NaN CUSUM would never alarm
+			alarm = p[4] == "1"; warned = p[7] == "1";
+			foreach (string x in p[6].Split(new[] { ' ' }, StringSplitOptions.RemoveEmptyEntries)) off.Add(x);
+			return true;
+		}
+		// a new account (a new eval, another PC): the newest state of another real account with the same profile, start date and calibration
+		private string[] EdgeSibling(out string src)
+		{
+			src = null; string[] best = null; int bd = 0, br = -1; double bs = 0;
+			try
+			{
+				string own = Path.GetFileName(EdgeFile);
+				foreach (string f in Directory.GetFiles(Core.Globals.UserDataDir, "nqmaster_edge_*.txt"))
+				{
+					string n = Path.GetFileName(f);
+					if (string.Equals(n, own, StringComparison.OrdinalIgnoreCase) || n.StartsWith("nqmaster_edge_Sim") || n.StartsWith("nqmaster_edge_Playback")) continue;
+					string[] p; try { p = File.ReadAllText(f).Split(';'); } catch { continue; }
+					int d, days, fb; double sv; bool al, wn; List<string> off;
+					if (!EdgeFits(p, true) || !EdgeParse(p, out d, out sv, out days, out al, out fb, out wn, out off)) continue;
+					if (curSessDay > 0 && d >= curSessDay) continue;	// newer than the loaded data
+					int rk = fb > 0 ? 2 : (al ? 1 : 0);
+					if (best == null || d > bd || (d == bd && (rk > br || (rk == br && sv > bs)))) { best = p; src = n; bd = d; br = rk; bs = sv; }
+				}
+			}
+			catch { }
+			return best;
 		}
 		private void EdgeRestore()
 		{
 			if (!EdgeMonitor || EdgeFile == null) return;
+			if (double.IsNaN(edgeK)) EdgeParams();
+			string src = Path.GetFileName(EdgeFile);
 			try
 			{
-				if (!File.Exists(EdgeFile))
+				string[] p = null; bool own = false;
+				if (File.Exists(EdgeFile))
+				{
+					string[] q = null; string err = null;
+					try { q = File.ReadAllText(EdgeFile).Split(';'); } catch (Exception e) { err = e.Message; }
+					int d0, n0, f0; double s0; bool a0, w0; List<string> o0;
+					if (q == null || (EdgeFits(q, false) && !EdgeParse(q, out d0, out s0, out n0, out a0, out f0, out w0, out o0)))
+					{
+						edgeNoSave = true;	// never overwrite a state that could not be read: it may be fine on the next start
+						Warn("nqm_edge_read", string.Format("NQMaster | edge monitor: the saved state ({0}) could not be read{1}. The monitor runs on the loaded history only and the file is left as it is (nothing is saved in this run). If it repeats, close NinjaTrader and check or delete the file.", src, err != null ? " (" + err + ")" : ""));
+						return;
+					}
+					double k9, h9;
+					bool damaged = q.Length < 9 || (q.Length >= 11 && (!double.TryParse(q[9], NumberStyles.Any, CultureInfo.InvariantCulture, out k9) || !double.TryParse(q[10], NumberStyles.Any, CultureInfo.InvariantCulture, out h9)));	// v3
+					if (damaged) Warn("nqm_edge_read", string.Format("NQMaster | edge monitor: the saved state ({0}) is damaged ({1} fields) and is replaced by the state rebuilt now.", src, q.Length));
+					else if (!EdgeFits(q, false)) Warn("nqm_edge_other", "NQMaster | edge monitor: the saved state is for another profile, start date or calibration and was ignored: " + src);
+					else if (curSessDay > 0 && int.Parse(q[1], CultureInfo.InvariantCulture) >= curSessDay) Warn("nqm_edge_other", "NQMaster | edge monitor: the saved state is newer than the loaded data (a Playback?) and was ignored: " + src);
+					else { p = q; own = true; }
+				}
+				if (p == null && !SimAccount)	// Sim / Playback never take another account's state (a Playback runs on past dates)
+				{
+					p = EdgeSibling(out src);
+					if (p != null) Warn("nqm_edge_sib", string.Format("NQMaster | edge monitor: no saved state for this account; it starts from the one of {0} (day {1}, CUSUM {2}{3}).", src, p[1], p[2],
+						p[5] != "0" ? ", FALLBACK running: " + p[5] + " days left" : (p[4] == "1" ? ", ALARM" : "")));
+				}
+				if (p == null)
 				{
 					DateTime st;
 					if (DateTime.TryParseExact(EdgeMonitorStart ?? "", "yyyy-MM-dd", CultureInfo.InvariantCulture, DateTimeStyles.None, out st) && firstBarDate > DateKey(st))
-						Warn("nqm_edge_hist", string.Format("NQMaster | edge monitor: the loaded history starts after the monitor start date ({0}) and no saved state exists, so it only counts {1} days. Load data from the start date or keep NinjaTrader running.", EdgeMonitorStart, edgeDays));
-					return;
+						Warn("nqm_edge_hist", string.Format("NQMaster | edge monitor: no saved state and the loaded history starts after the monitor start date ({0}): it only counts {1} days. From now on the state is saved and kept.", EdgeMonitorStart, edgeDays));
 				}
-				string[] p = File.ReadAllText(EdgeFile).Split(';');
-				if (p.Length < 9 || p[0] != Profile.ToString() || p[8] != (EdgeMonitorStart ?? "")) { Print("NQMaster | edge monitor: saved state is for another profile or start date - ignored."); return; }
-				int d = int.Parse(p[1], CultureInfo.InvariantCulture);
-				if (d < edgeLastDate) return;			// the history rebuild is newer
-				edgeLastDate = d; edgeS = double.Parse(p[2], CultureInfo.InvariantCulture); edgeDays = int.Parse(p[3], CultureInfo.InvariantCulture);
-				edgeAlarm = p[4] == "1"; edgeFbLeft = int.Parse(p[5], CultureInfo.InvariantCulture); edgeWarned = p[7] == "1";
-				edgeFbOff = new List<string>(); foreach (string x in p[6].Split(new[] { ' ' }, StringSplitOptions.RemoveEmptyEntries)) edgeFbOff.Add(x);
-				if (edgeAlarm && EdgeMonitorPause) edgePaused = true;
-				Print(string.Format("NQMaster | edge monitor state restored ({0}): CUSUM {1:0.00}, {2} days{3}", d, edgeS, edgeDays, edgeFbLeft > 0 ? ", fallback " + edgeFbLeft + " days left" : ""));
+				else
+				{
+					int d, days, fb; double sv; bool al, wn; List<string> off;
+					EdgeParse(p, out d, out sv, out days, out al, out fb, out wn, out off);
+					edgeLastDate = d; edgeS = sv; edgeDays = days; edgeAlarm = al; edgeFbLeft = fb; edgeWarned = wn; edgeFbOff = off;
+					// this account's file written by the old code on the day its fallback ended: alarm on, fallback over -> the reset it missed
+					if (own && p.Length < 11 && edgeAlarm && edgeFbLeft == 0 && !EdgeMonitorPause && EdgeAlarmFallback && EdgeFallbackDays > 0)
+					{ edgeAlarm = false; edgeS = 0; edgeFbOff = null; Print("NQMaster | edge monitor: the saved state had the alarm on with the fallback already over (old version): reset as the fallback end does."); }
+					edgePaused = edgeAlarm && EdgeMonitorPause;
+					// the days the loaded history closed after the saved state (warm-up excluded): replayed with the same state machine
+					int n = 0;
+					edgeReplay = true;
+					try
+					{
+						for (int i = 0; i < edgeHistD.Count; i++)
+							if (edgeHistD[i] > d && edgeCoverFrom > 0 && edgeHistD[i] >= edgeCoverFrom) { EdgeStep(KeyDate(edgeHistD[i]), edgeHistZ[i]); n++; }
+					}
+					finally { edgeReplay = false; }
+					Print(string.Format("NQMaster | edge monitor state restored ({0}, {1}){2}: CUSUM {3:0.00}, {4} days{5}", d, src,
+						n > 0 ? string.Format(" + {0} days from the loaded history", n) : "", edgeS, edgeDays, edgeFbLeft > 0 ? ", fallback " + edgeFbLeft + " days left" : ""));
+					// the history covers from after the next weekday of the saved state (or of the start date): the days in between are not counted
+					DateTime dd = DateTime.MinValue, st;
+					if (d > 0) dd = KeyDate(d).AddDays(1);
+					else if (DateTime.TryParseExact(EdgeMonitorStart ?? "", "yyyy-MM-dd", CultureInfo.InvariantCulture, DateTimeStyles.None, out st)) dd = st;
+					if (dd != DateTime.MinValue)
+					{
+						while (dd.DayOfWeek == DayOfWeek.Saturday || dd.DayOfWeek == DayOfWeek.Sunday) dd = dd.AddDays(1);
+						if (edgeCoverFrom > DateKey(dd))
+							Warn("nqm_edge_gap", string.Format("NQMaster | edge monitor: the saved state ends on {0} but the loaded history only covers from {1}: the days in between are not counted (NinjaTrader was off for longer than the loaded history). Nothing to do: the state continues from here.", d > 0 ? d.ToString(CultureInfo.InvariantCulture) : (EdgeMonitorStart ?? ""), edgeCoverFrom));
+					}
+				}
 			}
-			catch (Exception e) { Print("NQMaster | edge monitor state not restored: " + e.Message); }
+			catch (Exception e)
+			{
+				edgeNoSave = true;
+				Warn("nqm_edge_read", "NQMaster | edge monitor: state not restored (" + e.Message + "). The file is left as it is (nothing is saved in this run).");
+				return;
+			}
+			EdgeSave();	// patch_edge_restore.py: the state is current even if NinjaTrader is never running at 18:00 ET
+			if (mods != null) foreach (Mod m in mods) if (FallbackOff(m.Sig)) m.On = false;	// a restored fallback applies now (PropGoLive's session start recomputes the rest)
 		}
 		private void EdgeDayClose(DateTime etNow)
 		{
 			bool counted = EdgeMonitor && edgeDayRth && edgeDayTradable && edgeDayDate != DateTime.MinValue && !double.IsNaN(todayAtr) && todayAtr > 0
 				&& !(MinAtrPoints > 0 && todayAtr < MinAtrPoints);
+			// patch_edge_restore.py: the first day the history covers = the first day closed with the warm-up done
+			if (State != State.Realtime && edgeCoverFrom == 0 && edgeDayDate != DateTime.MinValue && !double.IsNaN(todayAtr) && todayAtr > 0 && atrCount >= AtrMin && rthDaysSeen >= WarmupDays) edgeCoverFrom = DateKey(edgeDayDate);
 			DateTime st;
 			if (counted && DateTime.TryParseExact(EdgeMonitorStart ?? "", "yyyy-MM-dd", CultureInfo.InvariantCulture, DateTimeStyles.None, out st) && edgeDayDate >= st)
 			{
-				if (double.IsNaN(edgeK)) EdgeParams();
-				if (edgeFbLeft > 0)
-				{
-					// review-set fallback running: the monitor rests (research/mine/os_adapt.py), then resets and the full profile returns
-					edgeFbLeft--; edgeLastDate = DateKey(edgeDayDate); EdgeSave();
-					if (edgeFbLeft == 0) { edgeAlarm = false; edgeS = 0; edgeFbOff = null; Warn("nqm_edge_fb", "NQMaster | edge-monitor fallback finished: full profile again, CUSUM reset."); }
-					edgeDayRth = false; return;
-				}
 				double z = (netPnl - dayStartPnl) / Math.Max(1, edgeDayQty) / (2.0 * todayAtr);
-				edgeS = Math.Max(0.0, edgeS + edgeK - z); edgeDays++; edgeLastDate = DateKey(edgeDayDate);
-				if (edgeS <= 0) edgeWarned = false;
-				if (!edgeWarned && !edgeAlarm && edgeHw > 0 && edgeS > edgeHw)
-				{
-					edgeWarned = true;
-					Warn("nqm_edge_w", string.Format("NQMaster | EDGE MONITOR WARNING {0}: results are running below the backtest ({1:0}% of the alarm level). Alert only: nothing changes; ~1 in 4 years gives a warning by chance.",
-						edgeDayDate.ToString("yyyy-MM-dd"), 100 * edgeS / edgeH));
-				}
-				if (PrintLog) Print(string.Format("{0} | NQM | EDGE day {1}: z {2:0.000} | CUSUM {3:0.00} / {4:0.00} ({5:0}%)", edgeDayDate.ToString("yyyy-MM-dd"), edgeDays, z, edgeS, edgeH, 100 * edgeS / edgeH));
-				if (!edgeAlarm && edgeS > edgeH)
-				{
-					edgeAlarm = true; edgePaused = EdgeMonitorPause;
-					string act = EdgeMonitorPause ? "New entries paused. Review, then set a new 'Edge monitor start date' to resume." : "Alert only (pause and fallback are off).";
-					if (!EdgeMonitorPause && EdgeAlarmFallback && EdgeFallbackDays > 0)
-					{
-						edgeFbOff = FallbackList(edgeDayDate.Year); edgeFbLeft = EdgeFallbackDays; edgeS = 0;
-						act = edgeFbOff.Count == 0 ? string.Format("Fallback: the yearly review keeps every module, so nothing changes for {0} days (alert only)." , EdgeFallbackDays)
-							: string.Format("Fallback for {0} trading days: modules off = {1}; then the full profile returns.", EdgeFallbackDays, string.Join(" ", edgeFbOff.ToArray()));
-					}
-					Warn("nqm_edge", string.Format("NQMaster | EDGE MONITOR ALARM {0}: live results are no longer consistent with the backtested edge ({1} days counted). {2}",
-						edgeDayDate.ToString("yyyy-MM-dd"), edgeDays, act));
-				}
+				if (State != State.Realtime) { edgeHistD.Add(DateKey(edgeDayDate)); edgeHistZ.Add(z); }	// patch_edge_restore.py: replayed over a saved state at go-live
+				EdgeStep(edgeDayDate, z);
 			}
 			if (State == State.Realtime) EdgeSave();
 			edgeDayRth = false;
+		}
+		// patch_edge_restore.py: one counted day of the edge monitor (the same state machine for the live day close and for the replay at go-live)
+		private void EdgeStep(DateTime day, double z)
+		{
+			if (double.IsNaN(edgeK)) EdgeParams();
+			string dl = day.ToString("yyyy-MM-dd") + (edgeReplay ? " (a day replayed from the loaded history)" : "");
+			if (edgeFbLeft > 0)
+			{
+				// review-set fallback running: the monitor rests (research/mine/os_adapt.py), then resets and the full profile returns
+				edgeFbLeft--; edgeLastDate = DateKey(day);
+				if (edgeFbLeft == 0) { edgeAlarm = false; edgeS = 0; edgeFbOff = null; Warn("nqm_edge_fb", "NQMaster | edge-monitor fallback finished: full profile again, CUSUM reset."); }
+				return;
+			}
+			edgeS = Math.Max(0.0, edgeS + edgeK - z); edgeDays++; edgeLastDate = DateKey(day);
+			if (edgeS <= 0) edgeWarned = false;
+			if (!edgeWarned && !edgeAlarm && edgeHw > 0 && edgeS > edgeHw)
+			{
+				edgeWarned = true;
+				Warn("nqm_edge_w", string.Format("NQMaster | EDGE MONITOR WARNING {0}: results are running below the backtest ({1:0}% of the alarm level). Alert only: nothing changes; ~1 in 4 years gives a warning by chance.",
+					dl, 100 * edgeS / edgeH));
+			}
+			if (PrintLog) Print(string.Format("{0} | NQM | EDGE day {1}: z {2:0.000} | CUSUM {3:0.00} / {4:0.00} ({5:0}%)", day.ToString("yyyy-MM-dd"), edgeDays, z, edgeS, edgeH, 100 * edgeS / edgeH));
+			if (!edgeAlarm && edgeS > edgeH)
+			{
+				edgeAlarm = true; edgePaused = EdgeMonitorPause;
+				string act = EdgeMonitorPause ? "New entries paused. Review, then set a new 'Edge monitor start date' to resume." : "Alert only (pause and fallback are off).";
+				if (!EdgeMonitorPause && EdgeAlarmFallback && EdgeFallbackDays > 0)
+				{
+					edgeFbOff = FallbackList(day.Year); edgeFbLeft = EdgeFallbackDays; edgeS = 0;
+					act = edgeFbOff.Count == 0 ? string.Format("Fallback: the yearly review keeps every module, so nothing changes for {0} days (alert only)." , EdgeFallbackDays)
+						: string.Format("Fallback for {0} trading days: modules off = {1}; then the full profile returns.", EdgeFallbackDays, string.Join(" ", edgeFbOff.ToArray()));
+				}
+				Warn("nqm_edge", string.Format("NQMaster | EDGE MONITOR ALARM {0}: live results are no longer consistent with the backtested edge ({1} days counted). {2}",
+					dl, edgeDays, act));
+			}
 		}
 
 
@@ -1805,7 +2057,8 @@ namespace NinjaTrader.NinjaScript.Strategies
 		private void PropSave(int tradeDay)
 		{
 			if (!propLive) return;
-			try { File.WriteAllText(PropFile, string.Format(CultureInfo.InvariantCulture, "{0:0.00};{1};{2:0.00};{3:0.00};{4:0.00}", propPeak, tradeDay, propDayStart, propBestDay, PropPeakOverride)); } catch { }
+			double eqs = double.NaN; try { eqs = PropEquity(); } catch { }	// patch_live_safety.py v2: field 5 = balance seen (stale-file check)
+			try { File.WriteAllText(PropFile, string.Format(CultureInfo.InvariantCulture, "{0:0.00};{1};{2:0.00};{3:0.00};{4:0.00};{5:0.00}", propPeak, tradeDay, propDayStart, propBestDay, PropPeakOverride, eqs)); } catch { }
 		}
 		private string PropFile { get { try { return Path.Combine(Core.Globals.UserDataDir, "nqmaster_prop_" + (Account != null ? Account.Name : "acct") + ".txt"); } catch { return null; } } }
 		// 2026-10-21: realtime prop equity comes from the account's cash. On a NinjaTrader simulation / playback account (Sim101 starts at
@@ -1834,7 +2087,7 @@ namespace NinjaTrader.NinjaScript.Strategies
 				simBase = netPnl; propPeak = StartBalance; propDayStart = double.NaN; propBestDay = EvalBestDaySoFar; targetHit = false;
 				PropSessionStart(); return;
 			}
-			propLive = true; propPeak = StartBalance; propDayStart = double.NaN; propBestDay = EvalBestDaySoFar;
+			propLive = true; propPeak = StartBalance; propDayStart = double.NaN; propBestDay = EvalBestDaySoFar; bool stateOk = false;
 			DateTime et = ToEt(Times[0][0]); DateTime td = et.Hour >= 18 ? et.Date.AddDays(1) : et.Date; int today = td.Year * 10000 + td.Month * 100 + td.Day;
 			try
 			{
@@ -1845,7 +2098,9 @@ namespace NinjaTrader.NinjaScript.Strategies
 					int fd = 0; double ds, bd, ov;
 					bool fresh = a.Length >= 4 && int.TryParse(a[1], out fd) && fd >= EvalStartInt();	// older than EvalStartDate = another eval
 					bool stalePeak = PropMode == NQMasterPropMode.Eval && a.Length >= 4 && !fresh;				// a new eval does not inherit an old peak
-					if (!stalePeak && a.Length > 0 && double.TryParse(a[0], NumberStyles.Any, CultureInfo.InvariantCulture, out v)) propPeak = Math.Max(propPeak, v);
+					if (!stalePeak && a.Length > 0 && double.TryParse(a[0], NumberStyles.Any, CultureInfo.InvariantCulture, out v)) { propPeak = Math.Max(propPeak, v); stateOk = true; }
+					double sc;	// v2: a file older than the last session whose saved balance differs from today's = the account traded elsewhere -> state unknown
+					if (stateOk && a.Length >= 6 && fd < prevSessDay && double.TryParse(a[5], NumberStyles.Any, CultureInfo.InvariantCulture, out sc)) { double cnow = double.NaN; try { cnow = AcctCash(); } catch { } if (!double.IsNaN(cnow) && Math.Abs(cnow - sc) > 50) stateOk = false; }
 					if (fresh && double.TryParse(a[2], NumberStyles.Any, CultureInfo.InvariantCulture, out ds))
 					{ if (fd == today) propDayStart = ds; else if (fd == prevSessDay) savedPrevDayStart = ds; }
 					if (fresh && double.TryParse(a[3], NumberStyles.Any, CultureInfo.InvariantCulture, out bd)) propBestDay = Math.Max(propBestDay, bd);
@@ -1854,8 +2109,18 @@ namespace NinjaTrader.NinjaScript.Strategies
 			}
 			catch { }
 			// manual correction (e.g. a stale file after an account reset): applied once; later restarts keep the higher saved peak
-			bool newOverride = double.IsNaN(storedOverride) || Math.Abs(PropPeakOverride - storedOverride) > 0.01;
-			if (PropPeakOverride > 0) propPeak = newOverride ? PropPeakOverride : Math.Max(propPeak, PropPeakOverride);
+			// patch_live_safety.py v4: a peak below the start balance is a typo (a trailing peak is never below it): ignored with an alert
+			double pov = PropPeakOverride;
+			if (pov > 0 && pov < StartBalance) { Warn("nqm_peak_bad", string.Format("NQMaster | PropPeakOverride {0:0} is below the start balance ({1:0}) and is ignored: type the firm's highest end-of-day BALANCE.", pov, StartBalance)); pov = 0; }
+			bool newOverride = double.IsNaN(storedOverride) || Math.Abs(pov - storedOverride) > 0.01;
+			if (pov > 0) propPeak = newOverride ? pov : Math.Max(propPeak, pov);
+			// patch_live_safety.py (code review 2026-10-29): no readable state file and a balance that is not the start balance = the trailing peak is unknown
+			double cash0 = double.NaN; try { cash0 = AcctCash(); } catch { }
+			thrOvBad = PropThresholdOverride > 0 && (PropThresholdOverride < StartBalance - PropTrailingDD - 1 || PropThresholdOverride > StartBalance + 101);	// v3: a typo (e.g. the drawdown instead of the level)
+			if (thrOvBad) Warn("nqm_thr_bad", string.Format("NQMaster | PropThresholdOverride {0:0} is outside the possible loss limits ({1:0} to {2:0}) and is ignored: type the firm's loss-limit LEVEL, not the drawdown amount.", PropThresholdOverride, StartBalance - PropTrailingDD, StartBalance + 100));
+			// v3: an override already stored (left loaded from an earlier start) does not vouch for today's state
+			propStateUnknown = !stateOk && !(pov > 0 && newOverride) && ThrOv() <= 0 && !double.IsNaN(cash0) && cash0 > 0 && Math.Abs(cash0 - StartBalance) > 50;
+			if (propStateUnknown) Warn("nqm_prop", string.Format("NQMaster | PROP STATE UNKNOWN for {0}: no readable state file and the balance ({1:0}) is not the start balance, so the trailing-drawdown peak may be wrong. Set PropPeakOverride to the firm's highest end-of-day balance (a new value: one already used before does not count), or PropThresholdOverride (the firm's loss-limit level). Until then the per-contract risk cap stays on in the funded account and the state is not saved.", Account != null ? Account.Name : "", cash0));
 			// first start of the day (no saved state): the day started at equity now minus what the account already realized today
 			if (double.IsNaN(propDayStart)) { try { propDayStart = PropEquity() - Account.Get(AccountItem.RealizedProfitLoss, Currency.UsDollar); } catch { } }
 			// the last session NinjaTrader saw start was not closed by it (shut down before 18:00): its P&L = today's start - its start
@@ -1877,9 +2142,11 @@ namespace NinjaTrader.NinjaScript.Strategies
 				if (double.IsNaN(propPeak)) propPeak = Math.Max(StartBalance, PropPeakOverride > 0 ? PropPeakOverride : eq);
 				double eqRef = restored ? propDayStart : eq;			// intraday cash is not an end-of-day balance
 				if (eqRef > propPeak) propPeak = eqRef;
-				PropSave(tday);
+				if (propLive && ThrOv() > 0) propPeak = Math.Max(propPeak, ThrOv() + PropTrailingDD);	// patch_live_safety.py v2
+				if (!propStateUnknown) PropSave(tday);	// patch_live_safety.py: never persist a peak computed without a state file or an override
 				propThr = propPeak >= StartBalance + PropTrailingDD + 100 ? StartBalance + 100 : propPeak - PropTrailingDD;
-				if (PropThresholdOverride > 0) propThr = PropThresholdOverride;
+				if (ThrOv() > 0) propThr = ThrOv();	// patch_live_safety.py v3: validated at go-live
+				if (State == State.Realtime && ThrOv() > 0) Warn("nqm_thr", string.Format("NQMaster | PropThresholdOverride is set ({0:0}): the loss limit stays fixed and does not follow the trailing drawdown. Prefer PropPeakOverride; clear this one once PropPeakOverride is set.", ThrOv()));
 				if (CyLive) { propPeak = StartBalance + cy.Pk; propThr = StartBalance + cy.Thr; }	// simulated seat: the audited rules engine
 				propCushion = eqRef - propThr;
 				if (PropMode == NQMasterPropMode.Eval) gate = propCushion >= EvalCushionFull ? GateMode.Full : GateMode.Safe;
@@ -2002,9 +2269,15 @@ namespace NinjaTrader.NinjaScript.Strategies
 		private void ExitModule(Mod m, string why)
 		{
 			if (desyncHalt) return;
+			if (State == State.Realtime && Working(m.ExitOrd)) { m.ExitAgain = true; Log(m.Sig + " exit already working, retried next bar if still needed: " + why); return; }	// patch_live_safety.py
+			// v5: an exit is never sent while the account and the strategy differ (an external flatten left the account flat: it would open a reverse position)
+			if (State == State.Realtime && AccountSyncGuard && desyncBars > 0) { m.ExitAgain = true; Log(m.Sig + " exit held: account and strategy differ, retried next bar if they agree again: " + why); return; }
+			if (State == State.Realtime && !AccountSyncGuard && m.ExitOrd != null && m.ExitTrade == m.TradeNo && (m.ExitOrd.OrderState == OrderState.Cancelled || m.ExitOrd.OrderState == OrderState.Rejected))
+			{ Log(m.Sig + " exit not resent: the previous one was " + m.ExitOrd.OrderState + " and the account sync guard is off: " + why); return; }
 			if (fillBip > 0) { ModuleMarketExit(m, Math.Max(1, m.OpenQty > 0 ? m.OpenQty : Position.Quantity), m.Sig + "X"); Log(m.Sig + " exit: " + why); return; }
-			if (Position.MarketPosition == MarketPosition.Long) ExitLong(fillBip, Math.Max(1, Position.Quantity), m.Sig + "X", m.Sig);
-			else if (Position.MarketPosition == MarketPosition.Short) ExitShort(fillBip, Math.Max(1, Position.Quantity), m.Sig + "X", m.Sig);
+			m.ExitBar = CurrentBars[0]; m.ExitAgain = false; m.ExitTrade = m.TradeNo;
+			if (Position.MarketPosition == MarketPosition.Long) m.ExitOrd = ExitLong(fillBip, Math.Max(1, Position.Quantity), m.Sig + "X", m.Sig);
+			else if (Position.MarketPosition == MarketPosition.Short) m.ExitOrd = ExitShort(fillBip, Math.Max(1, Position.Quantity), m.Sig + "X", m.Sig);
 			Log(m.Sig + " exit: " + why);
 		}
 
@@ -2172,7 +2445,7 @@ namespace NinjaTrader.NinjaScript.Strategies
 				if (first)
 				{
 				if (UseOrderFlowBoost) { ofEntries++; if (m.OfQ0 > 0 && execution.Order.Quantity > m.OfQ0) ofBoosted++; }
-				InactivityFill(m); CrossAccountPublish(); CrossAccountOnFill(m);
+				ExitDone(m); InactivityFill(m); CrossAccountPublish(); CrossAccountOnFill(m);	// ExitDone: patch_live_safety.py v3
 				if (m == orb) { orb.Trades++; if (orbFirstDir == 0) { orbFirstDir = orb.Dir; DateTime eo = ToEt(FillBarTime(time, execution.Order)).AddMinutes(-1); orbFirstMin = eo.Hour * 60 + eo.Minute; } }
 				if (m == orb2) orb2.Trades++;
 				if (m == volb) { volbDone = true; volb.EntryBar = FillBar(time, execution.Order); volbBeSet = false; volbTrades++; }
@@ -2200,7 +2473,9 @@ namespace NinjaTrader.NinjaScript.Strategies
 			Mod exitMod = BySig(execution.Order.FromEntrySignal);
 			if (exitMod != null)
 			{
-				exitMod.OpenQty = Math.Max(0, exitMod.OpenQty - quantity); if (exitMod.OpenQty == 0) { exitMod.InTrade = false; CancelBrackets(exitMod); }	// the sibling bracket, if NinjaTrader did not cancel it
+				if (State == State.Realtime && quantity > exitMod.OpenQty)	// patch_live_safety.py: more lots exited than the module had = double exit / overfill
+				{ Warn("nqm_overfill", string.Format("NQMaster | OVERFILL {0}: {1} x{2} with {3} lots open (modules: {4}) -> flattening this instrument (a reverse position would have no stop)", exitMod.Sig, execution.Order.Name, quantity, exitMod.OpenQty, OwnerList())); hedgeFlat = true; hedgeWhy = "overfill"; }
+				exitMod.OpenQty = Math.Max(0, exitMod.OpenQty - quantity); if (exitMod.OpenQty == 0) { exitMod.InTrade = false; CancelBrackets(exitMod); ExitDone(exitMod); }	// the sibling bracket, if NinjaTrader did not cancel it
 				Log(string.Format("{0} exit fill: {1} x{2} @ {3}{4}", exitMod.Sig, execution.Order.Name, quantity, Fmt(price), State == State.Realtime ? string.Format(" | account cash {0:0}", AcctCash()) : ""));
 				// research/mine/reentry_lab.py (2026-10-17): VOLB 2R re-armed once after a stop-out (not after the break-even stop), same levels, either
 				// side, before 15:00: 181 trades 2020-26, PF 1.52 / 1.32 (T1 / T2), +$58 per month per contract, Sharpe up in both periods, but max DD +6%
@@ -2208,7 +2483,14 @@ namespace NinjaTrader.NinjaScript.Strategies
 				if (exitMod == volb && exitMod.OpenQty == 0 && VolbReArm && !volbTrendOnly && volb.R >= 1.5 && !volbBeSet && volbTrades < 2 && !Working(volb.Entry) && (execution.Order.Name == "Stop loss" || execution.Order.Name == "StopX"))
 				{ volbDone = false; Log("VOLB stopped out: re-armed for a second attempt (VolbReArm)"); }
 			}
-			if (Position.MarketPosition == MarketPosition.Flat) foreach (Mod x in mods) { x.InTrade = false; x.OpenQty = 0; if (fillBip > 0) CancelBrackets(x); }
+			if (Position.MarketPosition == MarketPosition.Flat) foreach (Mod x in mods) { x.InTrade = false; x.OpenQty = 0; ExitDone(x); if (fillBip > 0) CancelBrackets(x); }
+			CrossAccountPublish();	// patch_live_safety.py: exits too (it returns at once outside live / without the guard)
+		}
+
+		protected override void OnPositionUpdate(NinjaTrader.Cbi.Position position, double averagePrice, int quantity, MarketPosition marketPosition)
+		{
+			CrossAccountPublish();	// patch_live_safety.py v2: the strategy position just changed (it returns at once outside live / without the guard)
+			if (propLive && State == State.Realtime && marketPosition == MarketPosition.Flat) propSaveDue = true;	// saved on the next bar, once the account cash has the trade
 		}
 
 		private void ProcessClosedTrades()
@@ -2223,7 +2505,7 @@ namespace NinjaTrader.NinjaScript.Strategies
 				if (netPnl > eqPeak) eqPeak = netPnl;
 			}
 			tradesProcessed = count;
-			if (Position.MarketPosition == MarketPosition.Flat) foreach (Mod x in mods) { x.InTrade = false; x.OpenQty = 0; if (fillBip > 0) CancelBrackets(x); }
+			if (Position.MarketPosition == MarketPosition.Flat) foreach (Mod x in mods) { x.InTrade = false; x.OpenQty = 0; ExitDone(x); if (fillBip > 0) CancelBrackets(x); }
 		}
 
 		private bool PauseActive()
@@ -2231,6 +2513,36 @@ namespace NinjaTrader.NinjaScript.Strategies
 			if (string.IsNullOrWhiteSpace(PauseFile)) return false;
 			try { string p = Path.IsPathRooted(PauseFile) ? PauseFile : Path.Combine(Core.Globals.UserDataDir, PauseFile); return File.Exists(p); }
 			catch { return false; }
+		}
+		// ---- clock check (patch_clock_check.py v2, 2026-10-29), alert only. (1) session template: CME index futures (ETH template) end a regular session
+		// at 17:00 ET. (2) ET conversion: ET from the bar's UTC time with the fixed US rule against ToEt() (the Windows 'Eastern Standard Time' rules).
+		// If the US ever changes its daylight-saving rule, update UsEtFromUtc.
+		private static DateTime UsEtFromUtc(DateTime utc)
+		{
+			int y = utc.Year;
+			DateTime mar = new DateTime(y, 3, 1); DateTime dstStart = mar.AddDays((7 - (int)mar.DayOfWeek) % 7 + 7).AddHours(7);	// 2nd Sunday of March, 02:00 EST = 07:00 UTC
+			DateTime nov = new DateTime(y, 11, 1); DateTime dstEnd = nov.AddDays((7 - (int)nov.DayOfWeek) % 7).AddHours(6);		// 1st Sunday of November, 02:00 EDT = 06:00 UTC
+			return utc.AddHours(utc >= dstStart && utc < dstEnd ? -4 : -5);
+		}
+		private string ClockProblem()
+		{
+			if (!shortSession && sessEndMin != 17 * 60)
+				return string.Format("this session ends at {0:00}:{1:00} ET, expected 17:00 ET: set the trading-hours template of the chart and of the strategy to 'CME US Index Futures ETH'", sessEndMin / 60, sessEndMin % 60);
+			try
+			{
+				DateTime utc = TimeZoneInfo.ConvertTimeToUtc(DateTime.SpecifyKind(Times[0][0], DateTimeKind.Unspecified), Core.Globals.GeneralOptions.TimeZoneInfo);
+				double diff = (ToEt(Times[0][0]) - UsEtFromUtc(utc)).TotalMinutes;
+				if (Math.Abs(diff) > 1) return string.Format("the ET time of this bar differs by {0:0} min from the US daylight-saving rule: update Windows (time-zone data) and check the NinjaTrader time zone (Tools > Options > General)", diff);
+			}
+			catch { }
+			return null;
+		}
+		private void ClockCheck()
+		{
+			string p = ClockProblem(); if (p == null) return;
+			if (State != State.Realtime) { clockHistCount++; if (clockHistWarned) return; clockHistWarned = true; }
+			else { int d = Times[0][0].Year * 10000 + Times[0][0].Month * 100 + Times[0][0].Day; if (clockWarnDay == d) return; clockWarnDay = d; }
+			Warn("nqm_clock", "NQMaster | CLOCK CHECK: " + p + ". Every module uses ET clock times.");
 		}
 		private DateTime ToEt(DateTime t)
 		{
@@ -2253,6 +2565,7 @@ namespace NinjaTrader.NinjaScript.Strategies
 		// With FillSeries Off every call below falls through to the Set* method it replaces: nothing changes.
 		private void BracketStop(Mod m, CalculationMode mode, double v)
 		{
+			m.RStopPx = mode == CalculationMode.Price; m.RStopV = v;	// panel open risk only (patch_open_risk.py); nothing else reads it
 			if (fillBip == 0) { SetStopLoss(m.Sig, mode, v, false); return; }
 			m.XStopPrice = mode == CalculationMode.Price; m.XStopV = v;
 			if (m.InTrade && Working(m.XStop)) { try { ChangeOrder(m.XStop, m.XStop.Quantity, 0, BracketPx(m, true)); } catch (Exception ex) { Log(m.Sig + " stop change failed: " + ex.Message); } }
@@ -2262,6 +2575,31 @@ namespace NinjaTrader.NinjaScript.Strategies
 			if (fillBip == 0) { SetProfitTarget(m.Sig, mode, v); return; }
 			m.XTgtPrice = mode == CalculationMode.Price; m.XTgtV = v;
 			if (m.InTrade && Working(m.XTgt)) { try { ChangeOrder(m.XTgt, m.XTgt.Quantity, BracketPx(m, false), 0); } catch (Exception ex) { Log(m.Sig + " target change failed: " + ex.Message); } }
+		}
+		// open risk for the panel (patch_open_risk.py v2): P&L of this NQMaster instance's open lots if every one hits its stop, from the entry price
+		// (the panel balance is realised cash), minus the exit commission ($1.90 round turn / 2) and 1 tick of slippage per lot. A stop beyond the entry
+		// (VOLB break-even) counts in favour. realAcct: skip while the account position does not match the strategy's (historical position after enabling).
+		private double PnlAtStops(bool realAcct)
+		{
+			double r = 0; int lots = 0;
+			try
+			{
+				if (realAcct)
+				{
+					int a = SignedQty(PositionAccount), q = SignedQty(Position);
+					if (a == 0 || q == 0 || Math.Sign(a) != Math.Sign(q)) return 0;
+				}
+				foreach (Mod m in mods)
+				{
+					if (!m.InTrade || m.OpenQty <= 0 || double.IsNaN(m.RStopV) || m.EntryPx <= 0) continue;
+					int dir = m.Dir != 0 ? m.Dir : (Position.MarketPosition == MarketPosition.Short ? -1 : 1);
+					double sp = m.RStopPx ? m.RStopV : m.EntryPx - dir * m.RStopV * TickSize;
+					r += (sp - m.EntryPx) * dir * m.OpenQty * Instrument.MasterInstrument.PointValue; lots += m.OpenQty;
+				}
+				r -= lots * (0.95 + TickSize * Instrument.MasterInstrument.PointValue);
+			}
+			catch { return 0; }
+			return lots > 0 ? r : 0;
 		}
 		private double BracketPx(Mod m, bool stop)
 		{
@@ -2660,7 +2998,23 @@ namespace NinjaTrader.NinjaScript.Strategies
 			{
 				case "trading": return "operando";
 				case "waiting": return "esperando datos";
-				default: return status;
+				// patch_panel_risk.py: the statuses that stop trading, in Spanish (display only)
+				case "NEWS BLACKOUT": return "noticia de alto impacto: sin posiciones ni entradas";
+				case "ACCOUNT / STRATEGY POSITION MISMATCH - see Output": return "LA CUENTA Y LA ESTRATEGIA NO COINCIDEN: ver Output";
+				case "the account refuses orders - see Output": return "la cuenta rechaza órdenes: ver Output";
+				case "holiday / half-day session: no trading": return "feriado o media sesión: no opera";
+				case "ROLL DATE: move the strategy to the next contract": return "FECHA DE ROLL: pasá la estrategia al contrato siguiente";
+				case "FOMC day: no trading": return "día de FOMC: no opera";
+				case "eval target reached": return "objetivo de la eval alcanzado: no opera";
+				case "drawdown guard": return "guarda de drawdown: detenida";
+				case "daily loss limit": return "límite de pérdida diaria: sin entradas hasta la próxima sesión (18:00 ET)";
+				case "prop daily stop": return "stop del día de la cuenta: sin entradas hasta la próxima sesión (18:00 ET)";
+				case "MANUAL PAUSE (file)": return "PAUSA MANUAL (archivo de pausa)";
+				case "EDGE MONITOR ALARM - review before trading": return "ALARMA DEL MONITOR DE BORDE: revisar antes de operar";
+				case "another account holds the opposite NQ position / entry (cross-account guard)": return "otra cuenta del grupo tiene la posición o una entrada opuesta (guarda entre cuentas)";
+				default:
+					if (status.StartsWith("low volatility (ATR ", StringComparison.Ordinal)) return "volatilidad baja: no opera " + status.Substring("low volatility ".Length);
+					return status;
 			}
 		}
 		private string DashAccount()
@@ -2689,6 +3043,8 @@ namespace NinjaTrader.NinjaScript.Strategies
 					else
 						b.AppendLine(string.Format("Cuenta actual: FONDEADA #{0}  ·  día {1}  ·  retiros {2}", cyFundN, cy.Days + 1, cy.Pays));
 					b.AppendLine(string.Format("Saldo {0}  ·  límite de pérdida {1}  ·  colchón {2}", Usd(bal), Usd(StartBalance + cy.Thr), Usd(prof - cy.Thr)));
+					double pst = PnlAtStops(false);
+					if (pst != 0) b.AppendLine(string.Format("Si tocan los stops abiertos de NQMaster (este gráfico, con comisión y 1 tick): {0}  ·  colchón que queda {1}{2}", Usd(pst), Usd(prof - cy.Thr + pst), prof - cy.Thr + pst <= 0 ? "  ·  ATENCIÓN: alcanza para perder la cuenta" : ""));
 					if (!cy.Funded && cy.Cons > 0 && cy.Bal > 0 && cy.Best > cy.Cons * Math.Max(cy.T, cy.Bal))
 						b.AppendLine(string.Format("Consistencia: el mejor día ({0}) obliga a llegar a {1}", Usd(cy.Best), Usd(cy.Best / cy.Cons)));
 					if (cy.Funded) b.AppendLine("Próximo retiro: " + cy.NextPayout(Usd));
@@ -2711,16 +3067,51 @@ namespace NinjaTrader.NinjaScript.Strategies
 				double eq = PropEquity();
 				b.AppendLine(string.Format("CUENTA REAL  ·  {0}  ·  {1}", Account != null ? Account.Name : "", PhaseName(PropMode)));
 				b.AppendLine(string.Format("Saldo {0} ({1})  ·  límite {2}  ·  colchón {3}", Usd(eq), Usd(eq - StartBalance), Usd(propThr), Usd(eq - propThr)));
-				if (!double.IsNaN(propDayStart)) b.AppendLine("Hoy: " + Usd(eq - propDayStart));
+				b.AppendLine(RiskLine());	// patch_panel_risk.py
+				double pstR = PnlAtStops(true);
+				if (pstR != 0) b.AppendLine(string.Format("Si tocan los stops abiertos de NQMaster (este gráfico, con comisión y 1 tick): {0}  ·  colchón que queda {1}{2}", Usd(pstR), Usd(eq - propThr + pstR), eq - propThr + pstR <= 0 ? "  ·  ATENCIÓN: alcanza para perder la cuenta" : ""));
+				if (!double.IsNaN(propDayStart)) b.AppendLine("Hoy: " + Usd(eq - propDayStart) + DayStopsText());	// patch_panel_risk.py: the day's stops
 				if (eq <= propThr) b.AppendLine("ATENCIÓN: el saldo está en el límite: verificá la cuenta en la firma");
-				if (PropMode == NQMasterPropMode.Eval && EvalTarget > 0) b.AppendLine(string.Format("Objetivo: {0} de {1}", Usd(eq - StartBalance), Usd(EvalTarget)));
+				if (PropMode == NQMasterPropMode.Eval && EvalTarget > 0)
+				{	// patch_panel_risk.py: the consistency rule raises the target (same formula as the eval target check)
+					double un = 0; try { un = Account.Get(AccountItem.UnrealizedProfitLoss, Currency.UsDollar); } catch { }	// same equity as the target check
+					double best = Math.Max(propBestDay, double.IsNaN(propDayStart) ? 0 : eq + un - propDayStart), needT = EvalTarget;
+					if (ConsistencyPct > 0) needT = Math.Max(needT, best * 100.0 / ConsistencyPct);
+					b.AppendLine(string.Format("Objetivo: {0} de {1}{2}", Usd(eq + un - StartBalance), Usd(needT),
+						needT > EvalTarget + 0.5 ? string.Format("  (el mejor día, {0}, obliga a más que {1} por la consistencia)", Usd(best), Usd(EvalTarget)) : ""));
+				}
 				if (PropMode == NQMasterPropMode.Funded) b.AppendLine((eq - StartBalance >= FundedPayoutAt ? "RETIRO DISPONIBLE: " : "Retiro: ") + payoutHint);
 			}
 			return b.ToString().TrimEnd();
 		}
+		// patch_panel_risk.py: lots per module today and the risk cap / step-up state (display only)
+		private string RiskLine()
+		{
+			string r = string.Format("Lotes por módulo hoy {0}", Math.Max(1, edgeDayQty));
+			if (!noBoost) r += string.Format(" (MOM1030 {0}, CPI09 {1})", HwQty(Mom1030Multiplier), HwQty(Cpi09Multiplier));
+			double capCush = PropMode == NQMasterPropMode.Eval ? EvalRiskCapCushion : FundedRiskCapCushion;
+			if (RiskCapPerContract > 0 && (PropMode == NQMasterPropMode.Funded || capCush > 0))
+				r += RiskCapActive ? string.Format("  ·  tope de riesgo ACTIVO: se saltean los trades de más de {0} por contrato", Usd(RiskCapPerContract))
+					: string.Format("  ·  tope de riesgo apagado (se activa si el colchón al abrir la sesión es menor a {0})", Usd(capCush));
+			if (StepUpOn) r += "  ·  escalón de contratos activo";
+			return r;
+		}
+		// patch_panel_risk.py: the account's daily stops, the same values PropDailyCheck uses (display only)
+		private string DayStopsText()
+		{
+			bool ev = PropMode == NQMasterPropMode.Eval;
+			double ls = ev ? EvalDailyStop : (PropMode == NQMasterPropMode.Funded && DailyLossPerContract > 0 ? DailyLossPerContract * Math.Max(1, edgeDayQty) : 0);
+			double ps = ev ? EvalProfitStop : (PropMode == NQMasterPropMode.Funded ? FundedProfitStop : 0);
+			string t = "";
+			if (ps > 0) t += string.Format("  ·  stop de ganancia del día en +{0}{1}", Usd(ps), ev ? " (consistencia)" : "");
+			if (ls > 0) t += string.Format("  ·  stop de pérdida del día en {0}", Usd(-ls));
+			if (propStopped) t += "  ·  DETENIDO hasta la próxima sesión (18:00 ET): saltó un stop del día";
+			return t;
+		}
 		private string DashWarnings()
 		{
 			StringBuilder b = new StringBuilder();
+			if (propStateUnknown) b.AppendLine("! Estado de la cuenta desconocido: cargá PropPeakOverride con el saldo de cierre más alto de la firma");	// patch_live_safety.py v2
 			if (zombieCount > 0) b.AppendLine(string.Format("! {0} órdenes trabadas descartadas (ver Output)", zombieCount));
 			if (capCuts > 0) b.AppendLine(string.Format("! Tope de {0} contratos abiertos: {1} entradas recortadas", MaxOpenContracts, capCuts));
 			if (shortSession) b.AppendLine(string.Format("! Sesión corta: cierra {0:00}:{1:00} ET", sessEndMin / 60, sessEndMin % 60));

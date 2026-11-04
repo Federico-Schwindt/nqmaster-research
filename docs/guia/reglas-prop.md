@@ -8,13 +8,15 @@ Pedido de Federico: más pase en evals de 50K, más probabilidad de cobrar por c
 
 **Regla fijada antes de correr:** una plaza o eval nueva reemplaza a la actual solo si, con 35% menos edge, en 2020-23 y en 2024-26 y con los dos niveles de fee, la mediana de la ganancia pareada es > 0 con P ≥ 0,80 y su P(año negativo) no empeora más de 3 puntos (MFFU: además no puede perder más de $100/mes extra sin edge). Nada nuevo pasó: **el plan sigue siendo 5 Lucid Flex 150K + 3 MFFU Rapid EOD 50K**.
 
-### Plazas (cifras de investigación, paridad NT pendiente; 2020-23 / 2024-26)
+### Plazas (cifras de investigación, paridad NT pendiente; arranques 2020-22 / 2023-26, cortes de `prop_wf`)
+
+Cifras del recálculo del 27-oct con la lista corregida (`integ_paired.json`; Lucid Pro recalculada en el mismo arnés).
 
 | Plaza | Cantidad | Preset | Fondeada ≤22 días (hasta 3 evals) | $/mes por plaza: edge completo | con 35% menos | sin edge | P(año negativo) con 35% menos |
 |---|---|---|---|---|---|---|---|
-| Lucid Flex 150K | 5 | `Lucid150K` (eval 6c, fondeada 3c) | 69 / 72% (35% menos 53 / 53%) | 2.467 / 2.260 | 1.423 / 1.406 | −38 / −52 | 3,4 / 4,6% |
-| MFFU Rapid EOD 50K | 3 | `Mffu50K` (eval 1c ×8, fondeada 1c, retiro dejando $4.100) | 41 / 49% (30 / 32%) | 1.414 / 1.163 | 717 / 503 | −131 / −131 | 13,7 / 18,4% |
-| Lucid Pro 50K (alternativa a la 150K si se prioriza el pase de 50K) | 0 | `LucidPro50K` | 88 / 84% (73 / 74%) | 1.209 / 1.131 | 804 / 682 | −42 / −114 | 2,2 / 6,0% |
+| Lucid Flex 150K | 5 | `Lucid150K` (eval 6c, fondeada 3c) | 69 / 71% (35% menos 54 / 51%) | 2.417 / 2.242 | 1.378 / 1.342 | −70 / −95 | 3,9 / 4,4% |
+| MFFU Rapid EOD 50K | 3 | `Mffu50K` (eval 1c ×8, fondeada 1c, retiro dejando $4.100) | 40 / 48% (31 / 31%) | 1.388 / 1.184 | 703 / 510 | −131 / −131 | 14,6 / 19,3% |
+| Lucid Pro 50K (alternativa a la 150K si se prioriza el pase de 50K) | 0 | `LucidPro50K` | 88 / 84% (73 / 74%) | 1.209 / 1.083 | 794 / 656 | −52 / −110 | 2,7 / 6,3% |
 | MFFU Builder 50K (condicional) | 0 | Manual | — | 958 / 835 (optimista) | 539 / 452 | −35 / −111 | — |
 | Bulenox Opt1 50K (condicional) | 0 | Manual | — | 855 / 810 (optimista) | 480 / 444 | −49 | — |
 | FundedNext Rapid Pro 50K (desborde) | 0 | `LucidPro50K` en eval + Manual | — | 612 / 645 | 344 / 331 | −120 / −146 | — |
@@ -384,7 +386,7 @@ Optimizado sobre el ciclo completo de 12 meses: evaluación, fondeada, cobros y 
 - Probabilidad de un año negativo: menos de 4%.
 
 **Alternativa APROBACIÓN** (si preferís perder menos evaluaciones aunque se gane menos):
-- EvalCushionFull = 900, EvalDailyStop = 700, AtrStartMax = 1,15 (empezar solo con el panel en "OK").
+- EvalCushionFull = 900, EvalDailyStop = 700, AtrStartMax = 1,15 (empezar solo con el panel en "OK"). **Obsoleto:** la compuerta de ATR se descartó el 13-oct (el efecto cambia de signo entre períodos, `smallacct_timing.json`) y `AtrStartMax` se fuerza a 0 en el código desde el 21-oct.
 - FundedCushionSafe = 1500, FundedHighFull = false, cobro a $6.000.
 - Aprobación 95 / 82 / 89%, pero ~$475-800 por mes por cuenta.
 
@@ -670,7 +672,7 @@ El oro sigue operando todo el tiempo.
 | NQMaster (MNQ 1 min) | Profile **Ultra**, Contracts **1**, AdaptiveSize **false**, DailyLossLimit **0** |
 | NQMaster, grupo 07 | PropMode **Eval**, EvalTarget **3000**, Trailing drawdown **2000**, Eval: full mode when cushion ≥ **1200**, Eval: modules below the cushion **Estable**, EvalProfitStop **1400**, ConsistencyPct **50**, AtrStartMax **1.15** |
 | GoldMaster (MGC 1 min) | Profile **WinRate**, Contracts **2** |
-| Arranque | Comprá o empezá la evaluación **solo el día en que el panel diga "OK to start a new eval"**: el ATR del día es menor a 1,15 veces su mediana de 60 días, y pasa en ~7 de cada 10 días. |
+| Arranque | ~~Comprá o empezá la evaluación solo el día en que el panel diga "OK to start a new eval" (ATR del día < 1,15 veces su mediana de 60 días).~~ **Obsoleto:** descartado el 13-oct (el efecto cambia de signo entre períodos) y retirado del código el 21-oct; la eval nueva se compra el día después de cada quiebre. |
 
 ### Resultado (simulación exacta minuto a minuto, Lucid Flex 50K, cada día posible de inicio)
 | Plan | Aprueba CFD 2024-26 | Aprueba MNQ real 2024-26 | Aprueba CFD 2020-23 | Mediana de días hábiles |
