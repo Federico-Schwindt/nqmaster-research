@@ -10,12 +10,13 @@ bash tools/cloud_setup.sh                       # una vez: pip install + reconst
 python3 tools/restore_data.py --check           # solo verifica SHA-256
 cd research/mine && python3 parity_check.py <csv de Strategy Analyzer> --set ultra_d4_mnq   # paridad NT vs investigación (set sobre MNQ; ultra_d4 = set de campaña sobre NQ)
 bash tools/nt8_stub/check.sh NQMaster.cs        # chequeo de sintaxis C# 5 contra un stub
+bash tools/run_tests.sh                         # tests (unittest): NQMaster.cs estático + mono, cadena de datos, motores; --rapido sin los lentos
 python3 tools/propcycle_test/run_test.py        # tras tocar PropCycle: tiene que dar 0 diferencias
 python tools/compress_data.py                   # antes de commitear cualquier archivo > 40 MB
 ```
 
 - Los scripts de `research/mine/` se corren desde su carpeta, los de `research/` desde `research/`. `core.Data("nq_1m.npz")` carga desde `research/data/`.
-- Los `patch_*.py` traen rutas de Windows (`D:\NinjaTrader Strategy\...`): pasalas a rutas relativas. Los backups que leen están ahora en `archive/backups/`.
+- `NQMaster.cs` es la fuente única desde el 2026-11-04: se edita directamente. Los `patch_*.py` históricos están en `archive/patches/` (no se corren; los docs viejos los citan como `research/mine/patch_*.py`). Antes de pedir F5: `bash tools/nt8_stub/check.sh NQMaster.cs` y `bash tools/run_tests.sh`.
 - Un script de `research/mine/` que se importa y trabaja a nivel de módulo se re-ejecuta y puede borrar datos densos: usá `if __name__ == "__main__"`.
 
 ## Compilar
@@ -44,5 +45,6 @@ NinjaTrader rechaza palabras contextuales como nombre de parámetro (`when`, `va
 - `.claude/skills/prop-rules/`: reglas de Lucid Flex 150K y MFFU Rapid 50K. `.claude/skills/validacion/`: protocolo de validación.
 - `Conocimiento/`: vault de Obsidian (`00 - MAPA.md`; `Descartado/` lista lo rechazado). `Mapa.canvas` y `.obsidian/` son su vista.
 - `research/`: motor de backtest (numpy + numba). `research/data/`: precios en 1 minuto. `research/mine/`: minería, auditorías, simulación de cuentas.
-- `archive/legacy/`: estrategias viejas y sus guías. `archive/backups/`: copias `*_backup_pre_*.cs`. No se editan.
+- `archive/legacy/`: estrategias viejas y sus guías. `archive/backups/`: copias `*_backup_pre_*.cs`. `archive/patches/`: los `patch_*.py` históricos (README con la última cadena). No se editan.
+- `tests/`: tests con unittest (`bash tools/run_tests.sh`). Huellas de la cadena de datos en `tests/fixtures/`; se regraban solo a propósito (`python3 -m tests.test_data_chain --record`).
 - `claude/global-CLAUDE.md`: instrucciones globales de Federico.

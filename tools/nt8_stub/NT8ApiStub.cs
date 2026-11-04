@@ -89,3 +89,5 @@ namespace NinjaTrader.NinjaScript.DrawingTools {
  public enum TextPosition { TopRight, TopLeft, BottomLeft, BottomRight, Center }
  public static class Draw { public static object TextFixed(object owner, string tag, string text, TextPosition p, System.Windows.Media.Brush b, NinjaTrader.Gui.Tools.SimpleFont f, System.Windows.Media.Brush o, System.Windows.Media.Brush a, int op){return null;} }
 }
+// 2026-11-04 (5F): indicators (OrderFlowRecorder.cs, BarExporterUTC.cs) type-check against the same base members as a strategy
+namespace NinjaTrader.NinjaScript.Indicators { public class Indicator : NinjaTrader.NinjaScript.StrategyBase { public bool IsOverlay, DisplayInDataBox, PaintPriceMarkers, IsSuspendedWhileInactive; protected virtual void OnMarketData(NinjaTrader.Data.MarketDataEventArgs marketDataUpdate){} } }

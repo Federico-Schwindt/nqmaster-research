@@ -32,6 +32,16 @@
 //   series is added and every order is submitted to it (SampleIntrabarBacktest), with explicit bracket orders 'StopX' / 'TargetX' on that
 //   series instead of SetStopLoss / SetProfitTarget (those stay on the primary series). Backtest only: at State.Realtime the orders go back
 //   to the 1-minute series, except on the Playback connection (bracket test), where the strategy clock is the replayed bar time (NowClock()).
+// v4.4 (2026-10-29 .. 11-04, code review + fronts 5E / 5F; trades of the backtest unchanged except ICT x2 -> x1):
+//   - clock check: session template and US daylight-saving rule (alert only); open risk at the stops and the real-account risk lines
+//     (lots per module, risk cap, day stops, eval target with consistency) on the panel; statuses in Spanish.
+//   - live safety (State.Realtime only): double exit / overfill and lots without owner -> flatten, escalation to Account.Flatten and
+//     stop after 3 bars; one working exit per module, retries only of this trade's exit and only with account = strategy; unknown
+//     prop state (missing or stale state file) -> funded risk cap on; override sanity checks; STOPPED WITH AN OPEN POSITION alert.
+//   - edge monitor: the saved state is continued with the days the loaded history closed (no reset after a restart), a new account
+//     takes the state of another real account with the same profile and calibration, atomic save.
+// SOURCE OF TRUTH since 2026-11-04: this file. The v4.3 -> v4.4 patch chain is archived in archive/patches (README there, verified by
+//   tools/verify_patch_chain.py). Edit this file directly, then run tools/nt8_stub/check.sh and tools/run_tests.sh before F5 on the PC.
 // ------------------------------------------------------------------------------------------------
 #region Using declarations
 using System;

@@ -150,7 +150,22 @@ Federico delegó las decisiones pendientes con el criterio de rendimiento del bo
 
 Frentes 5A (paridad y fills), 5B (motor de campaña, experimentos 02-06) y 5C (régimen, experimentos 07-09) cerrados en la nube, todos con revisión adversarial. Decisiones delegadas D1-D6 en `docs/DECISIONES_2026-10-29.md`: función objetivo D1; reglas de pausa 1 y 6 retiradas y la 4 como señal de revisión (ninguna pausa automática: sin edge la campaña tiene valor esperado positivo); ICT ×1 con regla de salida; campaña sobre NQ. Ninguna palanca de política, de régimen ni de tamaño mejoró la función objetivo; lo que falla (ventanas de 60 días negativas sobre historia contigua y con −35 %) viene de tramos malos reales del mercado. Mejoras de operación listas para F5: control de reloj (plantilla y horario de verano) y riesgo abierto en el panel.
 
-**Para la PC (Federico):** F5 de `NQMaster.cs` (trae `IctMultiplier = 1`, el control de reloj, el riesgo abierto del panel y la capa de seguridad en vivo de la revisión de código; nada de eso cambia trades del backtest) y Off 2024 → hoy con el Output: el export tiene que ser idéntico al de v4.3 salvo los lotes de ICT (2 → 1). Antes de comprar cuentas: los simulacros en Sim del runbook (desconexión de 30 s y 3 min; 2 cuentas con señales opuestas; deshabilitar con una posición abierta para oír `STOPPED WITH AN OPEN POSITION`) y repetir con el `NQMaster.cs` nuevo los dos Playback ya hechos (Tick1 6 contratos 13-15 oct y Off 16 oct): 0 `OVERFILL`, 0 `LOTS WITHOUT OWNER`, 0 `could not get flat`, 0 `exit retried` y 0 `exit order working`. En la primera cuenta real, la prueba única del control de estado de la cuenta (runbook, "Primer día de cada cuenta"). Después del domingo 1-nov (fin del horario de verano en EE.UU.), mirar que no aparezca `CLOCK CHECK` en la primera sesión.
+**Para la PC (Federico), en este orden:**
+1. **F5 de `NQMaster.cs` v4.4.** Trae:
+   - `IctMultiplier = 1`;
+   - el control de reloj;
+   - el riesgo abierto y las líneas de riesgo de la cuenta real en el panel;
+   - la capa de seguridad en vivo;
+   - la restauración del monitor de borde.
+   Lo que cambia trades del backtest es solo ICT 2 → 1. Si F5 da un error, mandame el texto: el stub no reemplaza al compilador de NinjaTrader.
+2. **Strategy Analyzer Off, 2024 → hoy, con el Output.** El export tiene que ser idéntico al de v4.3, salvo los lotes de ICT (2 → 1).
+3. **Repetir con el archivo nuevo los dos Playback ya hechos** (Tick1, 6 contratos, 13-15 oct; y Off, 16 oct). Tienen que dar 0 en cada uno de estos avisos: `OVERFILL`, `LOTS WITHOUT OWNER`, `could not get flat`, `exit retried` y `exit order working`.
+4. **Sim101 con PrintLog.** Dejar pasar un cierre de las 18:00 ET y volver a habilitar al día siguiente. Tiene que decir "edge monitor state restored … + N days" sin contar un día dos veces. En la primera sesión en vivo, mirar que no aparezca `CLOCK CHECK`: el horario de verano de EE.UU. terminó el 1-nov.
+5. **Simulacros del runbook, antes de comprar cuentas:**
+   - desconexión de 30 s y de 3 min, para fijar después `ConnectionLossHandling`;
+   - 2 cuentas con señales opuestas;
+   - deshabilitar con una posición abierta, para oír `STOPPED WITH AN OPEN POSITION`.
+6. **Primera cuenta real:** las líneas de la cuenta real en el panel y la prueba única del control de estado (runbook, "Primer día de cada cuenta").
 
 ## Diagnóstico 11 (2026-10-30, nube): repartir los módulos entre plazas (frente 5D)
 
@@ -175,9 +190,29 @@ Que la mitad de las plazas opere un grupo de módulos y la otra mitad el otro, c
 
 Revisión adversarial: F5 sí; detalles de texto corregidos (`docs/experimentos/revisiones/panel_2026-10-30/`). Las líneas solo aparecen en una cuenta real: el runbook pide mirarlas el primer día.
 
-**Siguiente en la nube:** 5D y 5E cerrados. 5F cerrado hasta el F5: los 7 parches esperan la PC. Lo que queda abierto es de la PC (ver arriba). En la nube, la consolidación de la cadena de parches en una fuente única (5F) conviene hacerla después del F5, para no tocar el archivo que se va a compilar.
+## Frente 5F (2026-11-04, nube): fuente única y tests
 
-- **Regenerar `NQMaster.cs` (29-oct):** `cp archive/backups/NQMaster_backup_pre_fillseries.cs NQMaster.cs && python3 research/mine/patch_fillseries.py && python3 research/mine/patch_parity_s2.py && python3 research/mine/patch_clock_check.py && python3 research/mine/patch_open_risk.py && python3 research/mine/patch_live_safety.py && python3 research/mine/patch_edge_restore.py && python3 research/mine/patch_panel_risk.py && bash tools/nt8_stub/check.sh NQMaster.cs`.
+- **`NQMaster.cs` es la fuente única** (v4.4) y se edita directamente.
+  - La cadena v4.3 → v4.4 (backup + 7 parches) está archivada en `archive/patches/`, junto con los otros 36 `patch_*.py` históricos.
+  - `python3 tools/verify_patch_chain.py` reproduce la cadena idéntica, byte a byte, al archivo consolidado (sha256 `85c0a3ef…`).
+  - Después de consolidar solo se agregó un encabezado de versión, que es un comentario.
+- **Tests** (`tests/`, unittest, `bash tools/run_tests.sh`; con `--rapido`, ~20 s; completo, ~40 s con el disco en caché o ~5 min sin caché). Son 15:
+  - los 4 `.cs` type-checkean contra el stub, que ahora también conoce la clase base de los indicadores;
+  - `string.Format` con los argumentos completos (`tools/fmtcheck.py`);
+  - ningún parámetro se llama como una palabra contextual. El test encontró `on` en `NQAccountGuard.cs.SetPause` y se renombró a `pauseOn`;
+  - cada estado que frena la operación tiene su texto en castellano;
+  - con mono, la regla de horario de verano de `UsEtFromUtc` contra America/New_York, hora por hora de 2010 a 2035 (53 cambios), y `EdgeParse` / `KeyDate` con 11 casos;
+  - el SHA-256 de los datos;
+  - la forma de los precios de IS / C24 / REAL / régimen;
+  - las huellas de `research_set('ultra_d4')` (7.573 trades) y `'ultra_d4_mnq'` (3.271), y de la caché de caminos de campaña;
+  - la auditoría a tres vías de PropCycle (780 casos, 0 diferencias);
+  - el selftest de `objective.py` (2.400 asientos, 0 diferencias);
+  - la cadena archivada.
+- **Las huellas se regraban solo a propósito**: `python3 -m tests.test_data_chain --record`, y el commit tiene que decir por qué.
+
+**Siguiente en la nube:** los frentes 5A-5F están cerrados. Lo que queda abierto es de la PC (ver "Para la PC"). Si vuelve un resultado de la PC (F5, export Off, Playback, simulacros), se analiza y se corrige directo en `NQMaster.cs`, con `bash tools/run_tests.sh` antes de pedir el siguiente F5.
+
+- **Fuente única (4-nov):** `NQMaster.cs` se edita directamente. La cadena v4.3 → v4.4 (backup + 7 parches) está archivada en `archive/patches/` y `python3 tools/verify_patch_chain.py` la reproduce idéntica a la consolidación (sha256 `85c0a3ef…`). Antes de cada F5: `bash tools/nt8_stub/check.sh NQMaster.cs` y `bash tools/run_tests.sh`.
 
 ## Dónde mirar
 

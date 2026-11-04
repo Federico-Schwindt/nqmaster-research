@@ -24,6 +24,8 @@ así que lo más nuevo suele estar arriba en `changelog.md` y `reglas-prop.md`.
 - `Conocimiento/`: base Obsidian (`00 - MAPA.md`), incluye `Descartado/`.
 - `archive/legacy/`: estrategias viejas con sus guías.
 - `archive/backups/`: copias `*_backup_pre_*.cs` de cada parche.
+- `archive/patches/`: los `patch_*.py` históricos. Desde el 4-nov, `NQMaster.cs` es la fuente única.
+- `tests/` y `tools/run_tests.sh`: tests del NinjaScript (estáticos y con mono), de la cadena de datos y de los motores de cuenta y de campaña.
 - `research/mine/*.md`: informes de cada experimento.
 
 ## Convenciones

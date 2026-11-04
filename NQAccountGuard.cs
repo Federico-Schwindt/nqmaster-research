@@ -98,15 +98,15 @@ namespace NinjaTrader.NinjaScript.Strategies
 					TextPosition.BottomRight, Brushes.White, dashFont, Brushes.Transparent, Brushes.Black, 75);
 		}
 
-		private void SetPause(bool on, string why)
+		private void SetPause(bool pauseOn, string why)	// 2026-11-04: 'on' is a contextual keyword (NinjaTrader rejects it as a parameter name)
 		{
 			if (State != State.Realtime) return;		// never touch the file during historical processing
 			try
 			{
 				string path = Path.IsPathRooted(PauseFile) ? PauseFile : Path.Combine(Core.Globals.UserDataDir, PauseFile);
 				bool exists = File.Exists(path);
-				if (on && !exists) { File.WriteAllText(path, "AUTO " + why); Print("NQAccountGuard | PAUSE ON: " + why); }
-				else if (!on && exists)
+				if (pauseOn && !exists) { File.WriteAllText(path, "AUTO " + why); Print("NQAccountGuard | PAUSE ON: " + why); }
+				else if (!pauseOn && exists)
 				{
 					string txt = File.ReadAllText(path);
 					if (txt.StartsWith("AUTO")) { File.Delete(path); Print("NQAccountGuard | PAUSE OFF"); }
